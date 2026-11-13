@@ -454,11 +454,11 @@ class AttitudeAnchor:
     #   中误差        → 快拉
     #   小误差        → 温和，避免把噪声放大成抖动
     GAIN_TIERS = (
-        (3.0, 12.0),    # 剩余 > 3°：gain 12
-        (1.0, 6.0),     # 剩余 > 1°：gain 6
-        (0.0, 2.0),     # 其余：gain 2（PhoneGyro 基线）
+        (2.0, 30.0),    # 剩余 > 2°：猛拉
+        (0.5, 12.0),    # 剩余 > 0.5°：快拉
+        (0.0, 3.0),     # 其余：温和收尾（不抖）
     )
-    MAX_CORR = math.radians(50.0)      # 修正上限 50°/s
+    MAX_CORR = math.radians(180.0)     # 上限 180°/s，允许「几乎立即」归位
     MIN_DT = 1e-4
 
     def _gain_for(self, err_deg: float) -> float:
