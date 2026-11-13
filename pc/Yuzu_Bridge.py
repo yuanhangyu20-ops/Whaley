@@ -397,6 +397,19 @@ class DSUServer(threading.Thread):
         if magic != DSU_MAGIC:
             return
 
+        # 诊断：记录每种消息类型的首次出现，便于确认 Yuzu 是否真的在连接
+        if not hasattr(self, "_seen_msgs"):
+            self._seen_msgs = set()
+        if msg not in self._seen_msgs:
+            self._seen_msgs.add(msg)
+            names = {
+                0x100000: "VERSION_REQ", 0x100001: "VERSION_RESP",
+                0x100100: "PORTS_REQ", 0x100101: "PORTS_RESP",
+                0x100002: "DATA", 0x100200: "DATA_REQ",
+            }
+            print(f"[DSU] 收到包 type=0x{msg:06X} ({names.get(msg, '?')}) "
+                  f"from {addr[0]}:{addr[1]}", flush=True)
+
         if msg == DSUS_MSG_VERSION_REQ:
             payload = struct.pack("<H", DSU_PROTOCOL_VERSION)
             try:
