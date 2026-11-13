@@ -114,7 +114,10 @@ sc query ViGEmBus
 **方式 A：免安装 exe（推荐，不用装 Python）**
 
 从 [Releases](https://github.com/yuanhangyu20-ops/WifiPad-Android/releases)
-下载 `鲸小游桥接.exe`，**双击运行**即可。
+下载 **`JingXiaoYou-Bridge.exe`**（即鲸小游桥接），**双击运行**即可。
+
+> GitHub 上使用英文文件名是为了避免下载时的编码问题；
+> 图标和界面都是中文的，运行后窗口标题不会影响使用。
 
 单文件、自包含，内置了 `ViGEmClient.dll`，唯一的系统依赖仍是 ViGEmBus 驱动。
 
