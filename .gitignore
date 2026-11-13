@@ -33,3 +33,7 @@ captures/
 __pycache__/
 *.pyc
 
+# ── PyInstaller 产物（exe 通过 GitHub Releases 分发，不进仓库）──
+dist/
+*.spec
+pc/build/

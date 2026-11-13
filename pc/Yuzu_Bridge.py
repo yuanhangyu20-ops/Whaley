@@ -161,13 +161,47 @@ class DS4_REPORT(ctypes.Structure):
 #  ViGEmClient 封装（ctypes）
 # ══════════════════════════════════════════════════════════════════
 
+# ==================================================================
+#  路径处理：兼容「直接运行 .py」与「PyInstaller 单文件 exe」
+# ==================================================================
+#
+# 打包成 exe(--onefile) 后：
+#   sys._MEIPASS   = 运行时临时解压目录，ViGEmClient.dll 在这里
+#   sys.executable = exe 的实际路径，日志应该写在它旁边
+# 若继续用 __file__ 会导致 DLL 找不到、日志写进临时目录后消失。
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_dir() -> str:
+    """可执行文件所在目录（日志写这里）"""
+    if _is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_dir() -> str:
+    """随程序打包的资源目录（DLL 在这里）"""
+    if _is_frozen():
+        return getattr(sys, "_MEIPASS", app_dir())
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 class VirtualDS4:
     """通过 ViGEmClient.dll 创建并驱动一个虚拟 DualShock 4 手柄"""
 
     def __init__(self, dll_path: str | None = None):
         if dll_path is None:
-            dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "ViGEmClient.dll")
+            # 先找资源目录（打包后是临时解压目录），再退回 exe 同级
+            for base in (resource_dir(), app_dir()):
+                cand = os.path.join(base, "ViGEmClient.dll")
+                if os.path.isfile(cand):
+                    dll_path = cand
+                    break
+            else:
+                dll_path = os.path.join(resource_dir(), "ViGEmClient.dll")
         if not os.path.isfile(dll_path):
             raise FileNotFoundError(f"找不到 ViGEmClient.dll：{dll_path}")
 
@@ -1214,7 +1248,7 @@ class DiscoveryResponder(threading.Thread):
 #  日志落盘：桥接窗口可能被其它窗口挡住，用户随时可以看 bridge.log
 # ══════════════════════════════════════════════════════════════════
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.log")
+LOG_PATH = os.path.join(app_dir(), "bridge.log")
 
 
 class _Tee:

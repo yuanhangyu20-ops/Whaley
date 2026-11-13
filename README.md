@@ -53,6 +53,7 @@
 | 📳 **触觉反馈** | 按键震动，手感接近实体手柄 |
 | 🛡️ **老设备兼容** | 无陀螺仪设备自动禁用体感并提示，绝不闪退 |
 | 📡 **自动发现** | 手机广播搜索，点一下自动填好电脑 IP，无需手输 |
+| 📦 **免安装 exe** | PC 端可打包成单文件，双击即用，不用装 Python |
 
 ---
 
@@ -108,7 +109,16 @@ sc query ViGEmBus
 # 应显示 STATE : 4  RUNNING
 ```
 
-#### 2. 准备 Python 环境
+#### 2. 启动桥接（两种方式）
+
+**方式 A：免安装 exe（推荐，不用装 Python）**
+
+从 [Releases](https://github.com/yuanhangyu20-ops/WifiPad-Android/releases)
+下载 `鲸小游桥接.exe`，**双击运行**即可。
+
+单文件、自包含，内置了 `ViGEmClient.dll`，唯一的系统依赖仍是 ViGEmBus 驱动。
+
+**方式 B：从源码运行**
 
 需要 **Python 3.8 或更高**（已在 3.11 / 3.12 / 3.13 / 3.15 上验证）。
 
@@ -117,15 +127,12 @@ sc query ViGEmBus
 
 ```powershell
 cd pc
-python -m pip install -r requirements.txt   # 只有注释，不会安装任何东西
-```
-
-#### 3. 启动桥接
-
-```powershell
-cd pc
 python Yuzu_Bridge.py
 ```
+
+> 想自己打包 exe：`pip install pyinstaller` 后运行 `pc\build_exe.bat`。
+
+#### 3. 确认启动成功
 
 看到下面这些就算就绪：
 
@@ -371,6 +378,8 @@ wifipad/
 └── pc/                               # 电脑端（Python，零第三方依赖）
     ├── Yuzu_Bridge.py                # 主桥接：虚拟 DS4 + DSU 服务器
     ├── ViGEmClient.dll               # ViGEm 客户端库
+    ├── app.ico                       # exe 图标
+    ├── build_exe.bat                 # 一键打包单文件 exe
     ├── fix_yuzu_motion.py            # 把 Yuzu 体感源改成 muhooku
     ├── fix_yuzu_guid.py              # 修正 Yuzu 的控制器 GUID 绑定
     ├── motion_viewer.py              # DSU 体感可视化调试工具
