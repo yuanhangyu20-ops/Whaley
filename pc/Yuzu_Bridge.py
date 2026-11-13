@@ -372,8 +372,17 @@ class DSUServer(threading.Thread):
                 data, addr = sock.recvfrom(1024)
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except ConnectionResetError:
+                # Windows 特有：对端端口不可达时内核回 ICMP Port Unreachable，
+                # recvfrom 会抛 WinError 10054。这**不是**致命错误，继续监听。
+                continue
+            except OSError as e:
+                if self._stop.is_set():
+                    break
+                # 其他瞬时网络错误：退避后继续，绝不让 DSU 线程死掉
+                print(f"[DSU] recv 异常（已忽略）: {e}", flush=True)
+                time.sleep(0.1)
+                continue
             self._handle(data, addr, sock)
 
         sock.close()
@@ -390,12 +399,18 @@ class DSUServer(threading.Thread):
 
         if msg == DSUS_MSG_VERSION_REQ:
             payload = struct.pack("<H", DSU_PROTOCOL_VERSION)
-            sock.sendto(dsu_build(self._server_id, DSUS_MSG_VERSION_RESP, payload), addr)
+            try:
+                sock.sendto(dsu_build(self._server_id, DSUS_MSG_VERSION_RESP, payload), addr)
+            except OSError:
+                pass
 
         elif msg == DSUS_MSG_PORTS_REQ:
             payload = struct.pack("<BB", 1, self.SLOT_INDEX)
             payload += struct.pack("<B", self.SLOT_STATE_CONNECTED)
-            sock.sendto(dsu_build(self._server_id, DSUS_MSG_PORTS_RESP, payload), addr)
+            try:
+                sock.sendto(dsu_build(self._server_id, DSUS_MSG_PORTS_RESP, payload), addr)
+            except OSError:
+                pass
 
         elif msg == DSUS_MSG_DATA_REQ:
             with self._clients_lock:
@@ -417,12 +432,18 @@ class DSUServer(threading.Thread):
                 continue
 
             pkt = self._make_data_packet()
+            dead = []
             for addr in targets:
                 try:
                     self._sock.sendto(pkt, addr)
                     self.sent += 1
                 except OSError:
-                    pass
+                    dead.append(addr)
+            # 清理已失效的客户端，避免推送数停滞
+            if dead:
+                with self._clients_lock:
+                    for a in dead:
+                        self._clients.pop(a, None)
 
             next_t += frame
             wait = next_t - time.monotonic()
