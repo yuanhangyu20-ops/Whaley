@@ -344,6 +344,11 @@ DSUS_MSG_PORTS_LEGACY = 0x100100
 
 DSU_HEADER = struct.Struct("<4sHHIII")   # 20 字节
 
+# 设备静默多久后改发"心跳帧"（角速度归零）。见 PhoneGyro 的 heartbeatLoop：
+# 若继续发送最后一帧的角速度，客户端会把它当成本帧的真实转速持续积分，
+# 表现为"手机已经断开，游戏里的视角还在匀速转圈"。
+IDLE_AFTER_SEC = 0.25
+
 # 单位换算
 RAD2DEG = 57.29577951308232     # rad/s → deg/s
 GRAVITY = 9.80665               # m/s² → g
@@ -695,6 +700,10 @@ class DSUServer(threading.Thread):
         self._packet_no = (self._packet_no + 1) & 0xFFFFFFFF
         # 积分时钟：首帧按标准 60Hz 间隔起算，之后累加真实推送间隔。
         now_t = time.monotonic()
+
+        # ── 心跳：手机静默时只维持订阅，不贡献任何旋转 ──
+        last_rx = s.get("last_rx_time", 0.0)
+        idle = (last_rx <= 0.0) or (now_t - last_rx > IDLE_AFTER_SEC)
         if self._last_push_t is None:
             self._ts_us += 16667          # 16.667ms ≈ 60Hz
         else:
@@ -707,7 +716,14 @@ class DSUServer(threading.Thread):
         # ── 姿态锚定（在手机坐标系里做，最后才转到 DSU 坐标系）──
         gx_r, gy_r, gz_r = s["gx"], s["gy"], s["gz"]
         anchored = False
-        if self.anchor_enabled and s.get("motion_enabled") and s.get("has_quat"):
+        if idle:
+            # 心跳帧：角速度清零。加速度保留最后值，让客户端冻结在当前姿态
+            # 而不是继续累积旋转；若从未收到过数据则用标准平放值。
+            gx_r = gy_r = gz_r = 0.0
+            if s["ax"] == 0.0 and s["ay"] == 0.0 and s["az"] == 0.0:
+                s = dict(s)
+                s["az"] = GRAVITY
+        elif self.anchor_enabled and s.get("motion_enabled") and s.get("has_quat"):
             self.anchor.push_ref((s["qx"], s["qy"], s["qz"], s["qw"]))
             (gx_r, gy_r, gz_r), anchored = self.anchor.correct(
                 (gx_r, gy_r, gz_r), now_t)
@@ -1044,6 +1060,45 @@ def pad_loop(gamepad: VirtualDS4, state: SharedState, stop: threading.Event,
 #  主程序
 # ══════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════
+#  日志落盘：桥接窗口可能被其它窗口挡住，用户随时可以看 bridge.log
+# ══════════════════════════════════════════════════════════════════
+
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.log")
+
+
+class _Tee:
+    """把输出同时写到控制台和文件"""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+                s.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
+def _install_log_file():
+    try:
+        f = open(LOG_PATH, "w", encoding="utf-8", buffering=1)
+        sys.stdout = _Tee(sys.__stdout__, f)
+        sys.stderr = _Tee(sys.__stderr__, f)
+        return f
+    except Exception:
+        return None
+
+
 def check_vigem_service() -> bool:
     """检查 ViGEmBus 驱动是否就绪"""
     try:
@@ -1079,6 +1134,8 @@ def main() -> int:
     ap.add_argument("--no-anchor", action="store_true",
                     help="禁用姿态锚定（视角出现异常匀速旋转时使用）")
     args = ap.parse_args()
+
+    _install_log_file()
 
     print("=" * 62)
     print("  WifiPad → Yuzu 桥接")
@@ -1128,6 +1185,7 @@ def main() -> int:
     print("  Yuzu 中把控制器设为「任意控制器」并启用体感（DSU）")
     print("  ABXY: " + ("交叉 A->B B->A X->Y Y->X" if not args.no_swap else "一一对应"))
     print("  姿态锚定: " + ("关闭" if args.no_anchor else "开启（抑制航向漂移）"))
+    print(f"  日志文件: {LOG_PATH}")
     print("  Ctrl+C 退出")
     print("-" * 62 + "\n")
 
