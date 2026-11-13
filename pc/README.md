@@ -180,10 +180,24 @@ Yuzu 按 **Switch 布局** 识别手柄，所以脚本对 ABXY 做了交换：
 |---|---|
 | 十字键 | D-Pad |
 | LB / RB | Left / Right Shoulder |
-| LT / RT | 左右扳机（模拟量 0~255） |
+| **LT / RT** | **左右扳机（模拟量 0~255，不是按钮）** |
 | L3 / R3（摇杆下压） | Left / Right Thumb |
+| **VIEW** | **BACK（Switch 的 Minus 键）** |
+| **MENU** | **START（Switch 的 Plus 键）** |
 | 左摇杆 | 左摇杆 |
-| 右摇杆 | 右摇杆 |
+| 右摇杆 | 右摇杆（**只由触摸控制，不含体感**） |
+
+> 若想关闭 ABXY 交叉映射，启动时加 `--no-swap`：
+> ```powershell
+> python Yuzu_Bridge.py --no-swap
+> ```
+
+### 体感与右摇杆是分开的
+
+- **右摇杆**：只响应屏幕上的触摸拖拽
+- **体感**：只通过 DSU 协议单独发送，不参与摇杆
+
+手机端已确保陀螺仪/加速度数据不叠加进 `rx/ry`，两者互不干扰。
 
 ### 体感
 
