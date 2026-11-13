@@ -443,10 +443,29 @@ def _q_log(q):
 
 
 class AttitudeAnchor:
-    """用手机姿态真值缓慢修正 DSU 客户端的积分漂移"""
+    """用手机姿态真值修正 DSU 客户端的积分漂移"""
 
-    MAX_CORR = math.radians(20.0)   # 修正量上限 20°/s
+    # 增益策略：误差就是"客户端姿态偏离真值多少"。
+    #   · 小误差用低增益，避免把传感器噪声放大成抖动
+    #   · 大误差（快速甩动后积累的）用高增益，尽快把画面拉回来，
+    #     否则用户会感觉"停了要等两三秒才归位"
+    # 三档增益：按剩余误差决定拉回力度
+    #   大误差（刚甩完）→ 猛拉，0.3 秒归位
+    #   中误差        → 快拉
+    #   小误差        → 温和，避免把噪声放大成抖动
+    GAIN_TIERS = (
+        (3.0, 12.0),    # 剩余 > 3°：gain 12
+        (1.0, 6.0),     # 剩余 > 1°：gain 6
+        (0.0, 2.0),     # 其余：gain 2（PhoneGyro 基线）
+    )
+    MAX_CORR = math.radians(50.0)      # 修正上限 50°/s
     MIN_DT = 1e-4
+
+    def _gain_for(self, err_deg: float) -> float:
+        for threshold, gain in self.GAIN_TIERS:
+            if err_deg > threshold:
+                return gain
+        return 2.0
 
     def __init__(self):
         self.est = (0.0, 0.0, 0.0, 1.0)   # 客户端将达到的姿态
@@ -499,11 +518,13 @@ class AttitudeAnchor:
         # 1. 误差 = log(conj(est) ⊗ q_ref)，est 是上一帧结束时客户端的姿态
         err = _q_log(_q_mul(_q_conj(self.est), self.q_ref))
 
-        # 2. 修正量就是 2*err（单位 rad/s），**不要除以 dt**
+        # 2. 修正量 = gain * err（rad/s），**不要除以 dt**
         #    除以 dt 会把修正放大 (1/dt) 倍：dt≈8ms 时放大 125 倍，
-        #    0.08° 的微小误差就会顶到 20°/s 上限，表现为画面被持续拖着转。
-        corr = [2.0 * e for e in err]
-        mag = math.sqrt(corr[0] ** 2 + corr[1] ** 2 + corr[2] ** 2)
+        #    0.08° 的微小误差就会顶到上限，表现为画面被持续拖着转。
+        err_mag = math.sqrt(err[0] ** 2 + err[1] ** 2 + err[2] ** 2)
+        gain = self._gain_for(math.degrees(err_mag))
+        corr = [gain * e for e in err]
+        mag = err_mag * gain
         if mag > self.MAX_CORR:
             k = self.MAX_CORR / mag
             corr = [c * k for c in corr]
