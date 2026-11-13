@@ -32,12 +32,16 @@ import java.nio.ByteOrder
  * 30     2    ax        加速度 X  0.01 m/s^2
  * 32     2    ay
  * 34     2    az
+ * 36     4    qx        相对姿态四元数（float32，相对于开始发送那一刻）
+ * 40     4    qy        供 PC 端做姿态锚定，抑制 DSU 客户端的积分漂移
+ * 44     4    qz
+ * 48     4    qw
  * ```
  */
 object Protocol {
     const val DEFAULT_PORT = 12345
-    const val PACKET_SIZE = 36
-    const val VERSION = 2
+    const val PACKET_SIZE = 52
+    const val VERSION = 3
 
     // 按键位掩码
     const val B_A = 1 shl 0
@@ -81,6 +85,11 @@ data class GamepadPacket(
     val ax: Float,
     val ay: Float,
     val az: Float,
+    /** 相对姿态四元数（相对于开始发送那一刻），用于姿态锚定 */
+    val qx: Float = 0f,
+    val qy: Float = 0f,
+    val qz: Float = 0f,
+    val qw: Float = 1f,
     /** true = Switch 模式（PC 端做 ABXY 交叉映射）*/
     val switchMode: Boolean = false,
     /** true = 本帧携带有效体感数据 */
@@ -112,6 +121,15 @@ data class GamepadPacket(
         buf.putShort(qSensor(if (motionEnabled) ax else 0f))
         buf.putShort(qSensor(if (motionEnabled) ay else 0f))
         buf.putShort(qSensor(if (motionEnabled) az else 0f))
+        // 姿态四元数（无体感时发单位四元数）
+        if (motionEnabled) {
+            buf.putFloat(qx)
+            buf.putFloat(qy)
+            buf.putFloat(qz)
+            buf.putFloat(qw)
+        } else {
+            buf.putFloat(0f); buf.putFloat(0f); buf.putFloat(0f); buf.putFloat(1f)
+        }
         return buf.array()
     }
 

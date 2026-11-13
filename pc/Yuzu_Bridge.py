@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import math
 import os
 import socket
 import struct
@@ -50,10 +51,12 @@ from ctypes import wintypes
 #  协议常量（与 Android 端 Protocol.kt v2 完全一致）
 # ══════════════════════════════════════════════════════════════════
 
-APP_PACKET = struct.Struct("<2sBBIQHBBbbbbhhhhhh")   # 36 字节
+APP_PACKET = struct.Struct("<2sBBIQHBBbbbbhhhhhhffff")   # 52 字节（v3 含四元数）
+APP_PACKET_V2 = struct.Struct("<2sBBIQHBBbbbbhhhhhh")     # 36 字节（v2 兼容）
 APP_MAGIC = b"WP"
-APP_VERSION = 2
+APP_VERSION = 3
 APP_PACKET_SIZE = APP_PACKET.size
+APP_PACKET_SIZE_V2 = APP_PACKET_V2.size
 
 # 按键位（与 Protocol.kt 的 B_* 对应）
 B_A = 1 << 0
@@ -271,6 +274,11 @@ class SharedState:
         self.packets = 0
         self.switch_mode = True      # 由手机 flags 更新
         self.motion_enabled = True   # 由手机 flags 更新
+        self.qx = 0.0                # 手机相对姿态四元数
+        self.qy = 0.0
+        self.qz = 0.0
+        self.qw = 1.0
+        self.has_quat = False        # 手机是否提供姿态
 
     def update_from_app(self, pkt: dict):
         with self._lock:
@@ -290,6 +298,11 @@ class SharedState:
             self.seq = pkt["seq"]
             self.switch_mode = pkt.get("switch_mode", True)
             self.motion_enabled = pkt.get("motion_enabled", True)
+            self.qx = pkt.get("qx", 0.0)
+            self.qy = pkt.get("qy", 0.0)
+            self.qz = pkt.get("qz", 0.0)
+            self.qw = pkt.get("qw", 1.0)
+            self.has_quat = pkt.get("has_quat", False)
             self.last_rx_time = time.monotonic()
             self.packets += 1
 
@@ -307,6 +320,9 @@ class SharedState:
                 "packets": self.packets,
                 "switch_mode": self.switch_mode,
                 "motion_enabled": self.motion_enabled,
+                "qx": self.qx, "qy": self.qy,
+                "qz": self.qz, "qw": self.qw,
+                "has_quat": self.has_quat,
             }
 
 
@@ -352,6 +368,153 @@ def dsu_build(server_id: int, msg_type: int, payload: bytes) -> bytes:
     return header[:8] + struct.pack("<I", crc) + raw[12:]
 
 
+# ══════════════════════════════════════════════════════════════════
+#  姿态锚定（Attitude Anchor）
+# ══════════════════════════════════════════════════════════════════
+#
+# 为什么需要它
+# ────────────
+# DSU 客户端（Yuzu/Cemu）自己用陀螺仪积分姿态。陀螺仪有零偏和标度误差，
+# 积分会持续累积：快速挥动时一分钟就能偏 8~16°。重力能慢慢把 pitch/roll
+# 拉回来，但**航向(yaw)没有任何参考能修正**，于是越玩越歪，且每次连接
+# 的零点不同 → 表现为"平放却是斜的、每次还不一样"。
+#
+# 做法（思路来自开源项目 PhoneGyro 的 motion/attitudeanchor.go）
+# ─────────────────────────────────────────────────────────────
+# 1. 维护 est：模拟「客户端按我们发出的角速度积分后会到达的姿态」
+# 2. 手机上送相对姿态四元数 q_ref 作为真值参考
+# 3. 误差 e = log(conj(est) ⊗ q_ref)，把 2e/dt 的角速度叠加到输出上
+# 4. 限幅 20°/s —— 让修正是"缓慢牵引"，不会盖掉真实的快速动作
+#
+# 结果：客户端积分被持续拉向真实姿态，航向漂移基本消失。
+
+
+def _q_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def _q_conj(q):
+    return (-q[0], -q[1], -q[2], q[3])
+
+
+def _q_norm(q):
+    return math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
+
+
+def _q_normalize(q):
+    n = _q_norm(q)
+    if n < 1e-9:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (q[0] / n, q[1] / n, q[2] / n, q[3] / n)
+
+
+def _q_exp(v):
+    """旋转向量（轴×角度）→ 四元数"""
+    theta = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    if theta < 1e-9:
+        return (0.0, 0.0, 0.0, 1.0)
+    s = math.sin(theta * 0.5) / theta
+    return (v[0] * s, v[1] * s, v[2] * s, math.cos(theta * 0.5))
+
+
+def _q_log(q):
+    """四元数 → 旋转向量"""
+    q = _q_normalize(q)
+    if q[3] < 0.0:          # 取最短路径
+        q = (-q[0], -q[1], -q[2], -q[3])
+    vn = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])
+    if vn < 1e-9:
+        return (0.0, 0.0, 0.0)
+    theta = 2.0 * math.atan2(vn, q[3])
+    k = theta / vn
+    return (q[0] * k, q[1] * k, q[2] * k)
+
+
+class AttitudeAnchor:
+    """用手机姿态真值缓慢修正 DSU 客户端的积分漂移"""
+
+    MAX_CORR = math.radians(20.0)   # 修正量上限 20°/s
+    MIN_DT = 1e-4
+
+    def __init__(self):
+        self.est = (0.0, 0.0, 0.0, 1.0)   # 客户端将达到的姿态
+        self.q_ref = None                 # 手机相对姿态
+        self.last_t = None
+        self.active = False
+        self.corr_mag = 0.0               # 当前修正强度（rad/s），供诊断
+
+    def reset(self):
+        self.est = (0.0, 0.0, 0.0, 1.0)
+        self.last_t = None
+        self.active = False
+        self.corr_mag = 0.0
+
+    def push_ref(self, q):
+        """更新手机姿态参考"""
+        if q is None:
+            return
+        n = _q_norm(q)
+        if n < 1e-6:
+            return
+        self.q_ref = _q_normalize(q)
+        # 首帧或参考归零时同步 est，避免一上来就产生巨大修正
+        if not self.active:
+            self.est = self.q_ref
+            self.active = True
+
+    def correct(self, gyro_rad, now_t):
+        """
+        Args:
+            gyro_rad: 手机坐标系下的角速度 (rad/s)
+        Returns:
+            (修正后的角速度, 是否生效)
+        """
+        if not self.active or self.q_ref is None:
+            return gyro_rad, False
+
+        if self.last_t is None:
+            self.last_t = now_t
+            return gyro_rad, False
+
+        dt = now_t - self.last_t
+        self.last_t = now_t
+        if dt < self.MIN_DT:
+            return gyro_rad, False
+        # 间隔过大（丢帧/卡顿）时不做修正，否则会算出一个巨大的角速度
+        if dt > 0.1:
+            return gyro_rad, False
+
+        # 1. est 按当前角速度前进
+        self.est = _q_normalize(
+            _q_mul(self.est, _q_exp((gyro_rad[0] * dt,
+                                     gyro_rad[1] * dt,
+                                     gyro_rad[2] * dt)))
+        )
+
+        # 2. 误差 = log(conj(est) ⊗ q_ref)
+        err = _q_log(_q_mul(_q_conj(self.est), self.q_ref))
+
+        # 3. 换算成角速度并限幅
+        corr = [2.0 * e / dt for e in err]
+        mag = math.sqrt(corr[0] ** 2 + corr[1] ** 2 + corr[2] ** 2)
+        if mag > self.MAX_CORR:
+            k = self.MAX_CORR / mag
+            corr = [c * k for c in corr]
+            mag = self.MAX_CORR
+        self.corr_mag = mag
+
+        return (gyro_rad[0] + corr[0],
+                gyro_rad[1] + corr[1],
+                gyro_rad[2] + corr[2]), True
+
+
 class DSUServer(threading.Thread):
     """Cemuhook DSU 服务端：响应握手并向 Yuzu 推送体感数据"""
 
@@ -373,6 +536,8 @@ class DSUServer(threading.Thread):
         # 客户端第一帧拿到的 delta 就是天文数字，角速度积分直接爆掉。
         self._ts_us = 0
         self._last_push_t = None
+        # 姿态锚定：抑制 DSU 客户端的积分漂移（尤其航向 yaw）
+        self.anchor = AttitudeAnchor()
         self._sock: socket.socket | None = None
         self.sent = 0
 
@@ -537,13 +702,24 @@ class DSUServer(threading.Thread):
         self._last_push_t = now_t
         ts_us = self._ts_us & 0xFFFFFFFFFFFFFFFF
 
+        # ── 姿态锚定（在手机坐标系里做，最后才转到 DSU 坐标系）──
+        gx_r, gy_r, gz_r = s["gx"], s["gy"], s["gz"]
+        anchored = False
+        if s.get("motion_enabled") and s.get("has_quat"):
+            self.anchor.push_ref((s["qx"], s["qy"], s["qz"], s["qw"]))
+            (gx_r, gy_r, gz_r), anchored = self.anchor.correct(
+                (gx_r, gy_r, gz_r), now_t)
+        elif self.anchor.active:
+            # 手机停止上报姿态：复位，避免用陈旧参考继续拉扯
+            self.anchor.reset()
+
         # ── 单位换算：m/s² → g，rad/s → deg/s ──
         mx = s["ax"] / GRAVITY      # 手机坐标：X 右
         my = s["ay"] / GRAVITY      #           Y 上
         mz = s["az"] / GRAVITY      #           Z 屏幕外
-        mgx = s["gx"] * RAD2DEG     # 绕 X（前后倾）
-        mgy = s["gy"] * RAD2DEG     # 绕 Y（左右转）
-        mgz = s["gz"] * RAD2DEG     # 绕 Z（屏幕内旋转）
+        mgx = gx_r * RAD2DEG        # 绕 X（前后倾）
+        mgy = gy_r * RAD2DEG        # 绕 Y（左右转）
+        mgz = gz_r * RAD2DEG        # 绕 Z（屏幕内旋转）
 
         # ── 坐标系转换：手机 → DSU/Switch Pro Controller ──
         # PadTest 验证的 DSU 约定（见 PhoneGyro docs/motion-pipeline §7）：
@@ -633,12 +809,22 @@ class PhoneReceiver(threading.Thread):
             except OSError:
                 break
 
-            if len(data) < APP_PACKET_SIZE:
+            if len(data) < APP_PACKET_SIZE_V2:
                 continue
+            qx = qy = qz = 0.0
+            qw = 1.0
+            has_quat = False
             try:
-                (magic, ver, flags, seq, ts, buttons,
-                 lt, rt, lx, ly, rx, ry,
-                 gx, gy, gz, ax, ay, az) = APP_PACKET.unpack_from(data)
+                if len(data) >= APP_PACKET_SIZE:
+                    (magic, ver, flags, seq, ts, buttons,
+                     lt, rt, lx, ly, rx, ry,
+                     gx, gy, gz, ax, ay, az,
+                     qx, qy, qz, qw) = APP_PACKET.unpack_from(data)
+                    has_quat = True
+                else:
+                    (magic, ver, flags, seq, ts, buttons,
+                     lt, rt, lx, ly, rx, ry,
+                     gx, gy, gz, ax, ay, az) = APP_PACKET_V2.unpack_from(data)
             except struct.error:
                 continue
             if magic != APP_MAGIC:
@@ -677,6 +863,8 @@ class PhoneReceiver(threading.Thread):
                 "az": azf,
                 "switch_mode": bool(flags & FLAG_MODE_SWITCH),
                 "motion_enabled": motion_on,
+                "qx": qx, "qy": qy, "qz": qz, "qw": qw,
+                "has_quat": has_quat and motion_on,
             })
 
         sock.close()
@@ -957,8 +1145,12 @@ def main() -> int:
                 ) or "-"
                 mode = "Switch" if s.get("switch_mode", True) else "Xbox"
                 mot = "开" if s.get("motion_enabled", True) else "关"
+                anchor_txt = "—"
+                if s.get("has_quat"):
+                    anchor_txt = f"{math.degrees(dsu.anchor.corr_mag):.1f}°/s"
                 print(
                     f"[状态] 手机{online} {pps:2d}pps  模式={mode} 体感={mot}  "
+                    f"姿态={'有' if s.get('has_quat') else '无'} 锚定={anchor_txt}  "
                     f"DSU客户端={dsu.client_count} 推送={dsu.sent}"
                 )
                 print(

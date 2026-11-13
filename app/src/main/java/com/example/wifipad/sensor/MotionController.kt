@@ -34,6 +34,32 @@ class MotionController(private val context: Context) : SensorEventListener {
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
+    /**
+     * 姿态传感器。用 GAME_ROTATION_VECTOR（不含磁力计）：
+     * 磁力计会被周围电器干扰导致航向乱跳，而姿态锚定只需要短时间稳定的参考。
+     */
+    private val rotationSensor =
+        sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+
+    /**
+     * 相对姿态四元数：相对于「开始采集那一刻」的旋转。
+     *
+     * 为什么用相对值而不是绝对值：
+     * 手机姿态的绝对朝向取决于设备摆放，每次连接都不一样；而 DSU 客户端
+     * 是从连接瞬间开始积分角速度的。用相对四元数可以让两边的零点天然对齐，
+     * 姿态锚定才能算出有意义的误差。
+     */
+    var qx by mutableFloatStateOf(0f); private set
+    var qy by mutableFloatStateOf(0f); private set
+    var qz by mutableFloatStateOf(0f); private set
+    var qw by mutableFloatStateOf(1f); private set
+
+    /** 基准姿态（开始采集时的方向） */
+    private var q0: FloatArray? = null
+
+    /** 四元数是否可用（设备是否有旋转矢量传感器） */
+    val hasOrientation: Boolean get() = rotationSensor != null
+
     // ── 原始值（m/s² 与 rad/s），供 DSU 使用 ──
     var rawAx by mutableFloatStateOf(0f); private set
     var rawAy by mutableFloatStateOf(0f); private set
@@ -75,6 +101,10 @@ class MotionController(private val context: Context) : SensorEventListener {
         gyroscope?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
         }
+        rotationSensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
+        }
+        q0 = null
     }
 
     fun stop() {
@@ -110,8 +140,53 @@ class MotionController(private val context: Context) : SensorEventListener {
                 rStickX = deadZone(-gy * sensitivity)
                 rStickY = deadZone(gx * sensitivity)
             }
+
+            Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                // values[0..2] = x·sin(θ/2), y·sin(θ/2), z·sin(θ/2)
+                // values[3]     = cos(θ/2)（部分设备不提供，需要自己算）
+                val v = event.values
+                var x = v[0]
+                var y = v[1]
+                var z = v[2]
+                var w = if (v.size > 3) v[3] else 0f
+                if (w == 0f) {
+                    val t = 1f - (x * x + y * y + z * z)
+                    w = if (t > 0f) kotlin.math.sqrt(t) else 0f
+                }
+                // 归一化，防止数值误差累积
+                val norm = kotlin.math.sqrt(x * x + y * y + z * z + w * w)
+                if (norm < 1e-6f) return
+                x /= norm; y /= norm; z /= norm; w /= norm
+
+                val cur = floatArrayOf(x, y, z, w)
+                val base = q0
+                if (base == null) {
+                    q0 = cur
+                    qx = 0f; qy = 0f; qz = 0f; qw = 1f
+                } else {
+                    // 相对姿态 = conj(base) ⊗ cur
+                    val rel = quatMul(quatConj(base), cur)
+                    qx = rel[0]; qy = rel[1]; qz = rel[2]; qw = rel[3]
+                }
+            }
         }
     }
+
+    /** 四元数乘法 a ⊗ b */
+    private fun quatMul(a: FloatArray, b: FloatArray): FloatArray {
+        val ax = a[0]; val ay = a[1]; val az = a[2]; val aw = a[3]
+        val bx = b[0]; val by = b[1]; val bz = b[2]; val bw = b[3]
+        return floatArrayOf(
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz
+        )
+    }
+
+    /** 四元数共轭（单位四元数的逆） */
+    private fun quatConj(q: FloatArray): FloatArray =
+        floatArrayOf(-q[0], -q[1], -q[2], q[3])
 
     /**
      * Android 的传感器坐标系锚定在设备的**自然方向**（竖屏）。

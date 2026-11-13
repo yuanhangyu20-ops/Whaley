@@ -170,6 +170,11 @@ fun WifiPadApp() {
                     ax = motion.rawAx,
                     ay = motion.rawAy,
                     az = motion.rawAz,
+                    // 相对姿态四元数：PC 端用它做姿态锚定，抑制积分漂移
+                    qx = motion.qx,
+                    qy = motion.qy,
+                    qz = motion.qz,
+                    qw = motion.qw,
                     switchMode = switchMode,
                     motionEnabled = motionEnabled
                 )
