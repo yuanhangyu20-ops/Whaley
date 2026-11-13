@@ -136,13 +136,14 @@ def main() -> int:
             except OSError:
                 break
 
-            if data and len(data) >= 90:
+            if data and len(data) >= 91:
                 mtype = HDR.unpack_from(data, 0)[5]
                 if mtype == MSG_DATA:
                     packets += 1
                     p = data[20:]
-                    ax, ay, az = struct.unpack("<fff", p[22:34])
-                    gx, gy, gz = struct.unpack("<fff", p[34:46])
+                    # Cemuhook 标准偏移：accel@23, gyro@35
+                    ax, ay, az = struct.unpack("<fff", p[23:35])
+                    gx, gy, gz = struct.unpack("<fff", p[35:47])
                     latest = (ax, ay, az, gx, gy, gz)
 
             now = time.time()

@@ -388,6 +388,14 @@ class DSUServer(threading.Thread):
         sock.close()
 
     def _handle(self, data: bytes, addr, sock: socket.socket):
+        # 诊断：记录进入 DSU 端口的**任何**原始包，无论格式是否合法
+        if not hasattr(self, "_raw_count"):
+            self._raw_count = 0
+        self._raw_count += 1
+        if self._raw_count <= 20:
+            print(f"[DSU-RAW] #{self._raw_count} len={len(data)} "
+                  f"from {addr[0]}:{addr[1]} hex={data[:32].hex()}", flush=True)
+
         if len(data) < DSU_HEADER.size:
             return
         try:
@@ -408,7 +416,8 @@ class DSUServer(threading.Thread):
                 0x100002: "DATA", 0x100200: "DATA_REQ",
             }
             print(f"[DSU] 收到包 type=0x{msg:06X} ({names.get(msg, '?')}) "
-                  f"from {addr[0]}:{addr[1]}", flush=True)
+                  f"len={len(data)} from {addr[0]}:{addr[1]} "
+                  f"hex={data[:24].hex()}", flush=True)
 
         if msg == DSUS_MSG_VERSION_REQ:
             payload = struct.pack("<H", DSU_PROTOCOL_VERSION)
@@ -468,21 +477,39 @@ class DSUServer(threading.Thread):
     def _make_data_packet(self) -> bytes:
         s = self.state.snapshot()
         self._packet_no = (self._packet_no + 1) & 0xFFFFFFFF
-        ts_us = int(time.monotonic() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
+        ts_us = int(time.time() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
 
         # 单位换算：m/s² → g，rad/s → deg/s
         ax, ay, az = s["ax"] / GRAVITY, s["ay"] / GRAVITY, s["az"] / GRAVITY
         gp, gy, gr = s["gx"] * RAD2DEG, s["gy"] * RAD2DEG, s["gz"] * RAD2DEG
 
+        # ── Cemuhook DSU pad data 负载（80 字节）──
+        # 偏移  字段            说明
+        #   0   slot            手柄槽位 0-3
+        #   1   slot_state      2 = 已连接
+        #   2   model           2 = 完整陀螺仪
+        #   3   battery         0xEF = 未知
+        #   4   is_active       1 = 活跃
+        #   5   packet_number   u32，递增
+        #   9   mac[6]          伪造的 MAC
+        #  15   timestamp       u64 微秒
+        #  23   accel[3]        float，单位 g
+        #  35   gyro[3]         float，单位 deg/s
+        #  47   unk[3]          保留
+        #  59   touch[12]       保留（无触摸）
+        #  71.. padding 到 80
         payload = struct.pack("<BB", self.SLOT_INDEX, self.SLOT_STATE_CONNECTED)
+        payload += struct.pack("<B", 2)              # model = 完整陀螺仪
+        payload += struct.pack("<B", 0xEF)           # battery = 未知
+        payload += struct.pack("<B", 1)              # is_active
         payload += struct.pack("<I", self._packet_no)
-        payload += b"\x00\x00\x00\x00\x00\x00"          # MAC 占位
-        payload += struct.pack("<BB", 0xEF, 1)          # 电量 / is_active
+        payload += b"\x00\x00\x00\x00\x00\x00"       # MAC 占位
         payload += struct.pack("<Q", ts_us)
-        payload += struct.pack("<fff", ax, ay, az)      # 加速度（g）
-        payload += struct.pack("<fff", gp, gy, gr)      # 陀螺仪（deg/s）
-        payload += struct.pack("<fff", 0.0, 0.0, 0.0)   # 保留
-        payload += b"\x00" * 12                          # 触摸数据
+        payload += struct.pack("<fff", ax, ay, az)   # 加速度（g）
+        payload += struct.pack("<fff", gp, gy, gr)   # 陀螺仪（deg/s）
+        payload += struct.pack("<fff", 0.0, 0.0, 0.0)
+        payload += b"\x00" * 12                      # 触摸数据
+        payload += b"\x00" * 9                       # 补齐到 80 字节
 
         return dsu_build(self._server_id, DSUS_MSG_DATA, payload)
 
