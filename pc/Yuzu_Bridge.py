@@ -1107,6 +1107,110 @@ def pad_loop(gamepad: VirtualDS4, state: SharedState, stop: threading.Event,
 # ══════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════
+#  自动发现：让手机不用手输 IP
+# ══════════════════════════════════════════════════════════════════
+#
+# 手机在局域网里广播 WIFIPAD_DISCOVER，本服务应答 WIFIPAD_HERE|ip|port，
+# 手机就能自动填好地址直接连。端口与手柄数据端口分开，互不干扰。
+
+DISCOVERY_PORT = 9999
+DISCOVERY_REQ = b"WIFIPAD_DISCOVER"
+DISCOVERY_RSP = b"WIFIPAD_HERE"
+
+
+def get_lan_ip() -> str:
+    """
+    取本机在局域网中的 IP。
+
+    不需要真的联网：连一个外部地址只是让内核选出「默认路由使用的网卡」，
+    UDP connect 不会发包，即使断网也能立刻返回。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def get_all_lan_ips() -> list:
+    """列出所有可能的局域网 IPv4（多网卡时给用户参考）"""
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except Exception:
+        pass
+    # 把默认路由网卡的 IP 提到最前面（VPN/虚拟网卡常有多个地址）
+    primary = get_lan_ip()
+    if primary and not primary.startswith("127."):
+        if primary in ips:
+            ips.remove(primary)
+        ips.insert(0, primary)
+    return ips
+
+
+class DiscoveryResponder(threading.Thread):
+    """监听广播请求，回复本机的桥接地址"""
+
+    def __init__(self, data_port: int, host: str = ""):
+        super().__init__(daemon=True, name="DiscoveryResponder")
+        self.data_port = data_port
+        self.host = host
+        self._stop = threading.Event()
+        self._sock = None
+        self.requests = 0
+
+    def run(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # 允许接收广播
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.bind(("", DISCOVERY_PORT))
+            sock.settimeout(1.0)
+            self._sock = sock
+        except Exception as e:
+            print(f"[发现] 启动失败（不影响手动连接）: {e}", flush=True)
+            return
+
+        while not self._stop.is_set():
+            try:
+                data, addr = sock.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                time.sleep(0.2)
+                continue
+
+            if not data.startswith(DISCOVERY_REQ):
+                continue
+
+            self.requests += 1
+            ip = get_lan_ip()
+            reply = f"{DISCOVERY_RSP.decode()}|{ip}|{self.data_port}".encode()
+            try:
+                sock.sendto(reply, addr)
+                if self.requests <= 5:
+                    print(f"[发现] {addr[0]} 请求连接 → 已告知地址 {ip}:{self.data_port}",
+                          flush=True)
+            except OSError:
+                pass
+
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def stop(self):
+        self._stop.set()
+
+
+# ══════════════════════════════════════════════════════════════════
 #  日志落盘：桥接窗口可能被其它窗口挡住，用户随时可以看 bridge.log
 # ══════════════════════════════════════════════════════════════════
 
@@ -1227,7 +1331,24 @@ def main() -> int:
     pad_thread.start()
 
     print("\n" + "-" * 62)
-    print("  就绪。请在手机上填入本机 IP，端口 %d，点「开始连接」" % args.port)
+    lan_ips = get_all_lan_ips()
+    print()
+    print("  ┌──────────────────────────────────────────────────────┐")
+    print("  │  手机端填写下面这个 IP（端口 %-5d）              │" % args.port)
+    print("  └──────────────────────────────────────────────────────┘")
+    if lan_ips:
+        for i, ip in enumerate(lan_ips):
+            mark = "  ← 推荐" if i == 0 else ""
+            print(f"      {ip}{mark}")
+    else:
+        print("      (未检测到局域网 IP，请用 ipconfig 查看)")
+
+    print(f"\n  或者：手机端点「自动搜索电脑」即可，无需手输 IP")
+
+    # 自动发现服务
+    discovery = DiscoveryResponder(args.port)
+    discovery.start()
+    print(f"  [发现] 自动搜索服务已启动 (UDP {DISCOVERY_PORT})")
     print("  Yuzu 中把控制器设为「任意控制器」并启用体感（DSU）")
     print("  ABXY: " + ("交叉 A->B B->A X->Y Y->X" if not args.no_swap else "一一对应"))
     print("  姿态锚定: " + ("关闭" if args.no_anchor else "开启（抑制航向漂移）"))

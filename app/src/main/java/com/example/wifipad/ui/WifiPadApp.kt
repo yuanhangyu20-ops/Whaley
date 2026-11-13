@@ -56,6 +56,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.wifipad.haptic.HapticController
+import com.example.wifipad.net.Discovery
 import com.example.wifipad.net.GamepadPacket
 import com.example.wifipad.net.Protocol
 import com.example.wifipad.net.UdpSender
@@ -64,7 +65,9 @@ import com.example.wifipad.ui.components.XboxGamepad
 import com.example.wifipad.ui.theme.WifiPadTheme
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 
 @Composable
@@ -90,7 +93,7 @@ fun WifiPadApp() {
         context.getSharedPreferences("wifipad", android.content.Context.MODE_PRIVATE)
     }
     var ipText by rememberSaveable {
-        mutableStateOf(prefs.getString("ip", "192.168.1.100") ?: "192.168.1.100")
+        mutableStateOf(prefs.getString("ip", "") ?: "")
     }
     var portText by rememberSaveable {
         mutableStateOf(prefs.getString("port", Protocol.DEFAULT_PORT.toString())
@@ -419,6 +422,7 @@ private fun SettingsDrawer(
                 value = ip,
                 onValueChange = onIpChange,
                 label = { Text("电脑 IP") },
+                placeholder = { Text("点下方「自动搜索电脑」自动填入") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -430,6 +434,43 @@ private fun SettingsDrawer(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(Modifier.height(8.dp))
+
+            // ── 自动搜索电脑（无需手输 IP）──
+            var discovering by remember { mutableStateOf(false) }
+            var discoverMsg by remember { mutableStateOf<String?>(null) }
+            val scope = rememberCoroutineScope()
+
+            OutlinedButton(
+                onClick = {
+                    if (discovering) return@OutlinedButton
+                    scope.launch {
+                        discovering = true
+                        discoverMsg = "正在搜索同一 Wi-Fi 下的电脑…"
+                        val found = withContext(Dispatchers.IO) { Discovery.discover() }
+                        discovering = false
+                        if (found != null) {
+                            onIpChange(found.ip)
+                            onPortChange(found.port.toString())
+                            discoverMsg = "✓ 已找到电脑 ${found.ip}，点「开始连接」"
+                        } else {
+                            discoverMsg = "未找到。请确认电脑端桥接已运行、手机与电脑在同一 Wi-Fi"
+                        }
+                    }
+                },
+                enabled = !sending,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (discovering) "正在搜索…" else "自动搜索电脑")
+            }
+            discoverMsg?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             Spacer(Modifier.height(10.dp))
             Button(
                 onClick = onToggle,
