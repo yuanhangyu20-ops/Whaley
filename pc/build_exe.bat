@@ -3,9 +3,12 @@ chcp 65001 >nul
 REM ============================================================
 REM  鲸小游桥接 - 一键打包单文件 exe（图形界面版）
 REM ============================================================
-REM  生成 dist\Whaley-Bridge.exe（无控制台，纯图形界面），
-REM  内置 ViGEmClient.dll，目标机器无需安装 Python，
-REM  仅需 ViGEmBus 驱动。
+REM  生成 dist\Whaley-Bridge.exe
+REM
+REM  关于文件名：Windows 防火墙弹窗显示的是 exe 的实际文件名，
+REM  不受版本资源影响。若 exe 叫「鲸小游桥接.exe」，弹窗就会显示
+REM  这个中文名。为了弹窗显示 Whaley-Bridge，这里用英文文件名，
+REM  桌面上再放一个中文名的快捷方式即可。
 REM
 REM  需要: Python 3.8+ 与 pyinstaller
 REM        pip install pyinstaller
@@ -34,6 +37,7 @@ python -m PyInstaller ^
     --windowed ^
     --name "Whaley-Bridge" ^
     --icon "app.ico" ^
+    --version-file "version_info.txt" ^
     --add-binary "ViGEmClient.dll;." ^
     --add-data "app_icon.png;." ^
     --hidden-import gui ^
@@ -54,7 +58,8 @@ echo ============================================================
 echo  打包完成: dist\Whaley-Bridge.exe
 echo ============================================================
 echo.
-echo  这是图形界面版本，双击打开控制面板。
+echo  双击打开图形控制面板。
+echo  桌面快捷方式可以命名成「鲸小游桥接」。
 echo  仍需先安装 ViGEmBus 驱动。
 echo.
 pause
