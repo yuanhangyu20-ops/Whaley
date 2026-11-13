@@ -142,9 +142,11 @@ fun WifiPadApp() {
                     rTrigger = state.netRTrigger,
                     lx = state.netStickX,
                     ly = state.netStickY,
-                    // 右摇杆 = 实体摇杆 + 体感映射（两者叠加，钳制到 [-1,1]）
-                    rx = (state.netRStickX + motion.rStickX).coerceIn(-1f, 1f),
-                    ry = (state.netRStickY + motion.rStickY).coerceIn(-1f, 1f),
+                    // 右摇杆：只由屏幕触摸拖拽控制。
+                    // 体感数据绝不叠加进来 —— 否则手一动摇杆就跟着动。
+                    // 体感只通过 gx/gy/gz + ax/ay/az 字段发送，由 PC 端走 DSU。
+                    rx = state.netRStickX,
+                    ry = state.netRStickY,
                     gx = motion.gx,
                     gy = motion.gy,
                     gz = motion.gz,

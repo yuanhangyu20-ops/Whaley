@@ -18,6 +18,7 @@ import java.nio.ByteOrder
  *                        A=bit0  B=bit1  X=bit2  Y=bit3
  *                        UP=bit4 DOWN=bit5 LEFT=bit6 RIGHT=bit7
  *                        LT=bit8 RT=bit9 LB=bit10 RB=bit11 L3=bit12 R3=bit13
+ *                        VIEW=bit14  MENU=bit15
  * 18     1    lt        左扳机 0..255
  * 19     1    rt        右扳机 0..255
  * 20     1    lx        左摇杆 X  -127..127
@@ -52,6 +53,8 @@ object Protocol {
     const val B_RB = 1 shl 11
     const val B_L3 = 1 shl 12
     const val B_R3 = 1 shl 13
+    const val B_VIEW = 1 shl 14
+    const val B_MENU = 1 shl 15
 }
 
 /** 一帧完整的输入状态 */

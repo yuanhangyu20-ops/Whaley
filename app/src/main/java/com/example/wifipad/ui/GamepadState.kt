@@ -25,13 +25,15 @@ object Btn {
     const val RB = 12
     const val L3 = 13
     const val R3 = 14
+    const val VIEW = 15
+    const val MENU = 16
 
     val names: Map<Int, String> = mapOf(
         A to "A", B to "B", X to "X", Y to "Y",
         DPAD_UP to "UP", DPAD_DOWN to "DOWN",
         DPAD_LEFT to "LEFT", DPAD_RIGHT to "RIGHT",
         LT to "LT", RT to "RT", LB to "LB", RB to "RB",
-        L3 to "L3", R3 to "R3"
+        L3 to "L3", R3 to "R3", VIEW to "VIEW", MENU to "MENU"
     )
 
     fun protocolBit(id: Int): Int = when (id) {
@@ -49,6 +51,8 @@ object Btn {
         RB -> Protocol.B_RB
         L3 -> Protocol.B_L3
         R3 -> Protocol.B_R3
+        VIEW -> Protocol.B_VIEW
+        MENU -> Protocol.B_MENU
         else -> 0
     }
 }

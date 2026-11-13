@@ -1,5 +1,8 @@
 package com.example.wifipad.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,12 +14,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.wifipad.haptic.HapticController
 import com.example.wifipad.ui.Btn
 import com.example.wifipad.ui.GamepadState
@@ -60,7 +71,12 @@ fun XboxGamepad(
                     pressed = state.isDown(Btn.LT),
                     haptic = haptic,
                     isDark = isDark,
-                    onPress = { down -> toggle(state, Btn.LT, down) }
+                    onPress = { down ->
+                        // 关键：同时写入模拟量（0.0~1.0）与按键位，
+                        // 否则虚拟手柄的 bLeftTrigger 永远是 0
+                        state.updateLTrigger(if (down) 1f else 0f)
+                        toggle(state, Btn.LT, down)
+                    }
                 )
                 Spacer(Modifier.width(10.dp))
                 ShoulderKey(
@@ -85,7 +101,10 @@ fun XboxGamepad(
                     pressed = state.isDown(Btn.RT),
                     haptic = haptic,
                     isDark = isDark,
-                    onPress = { down -> toggle(state, Btn.RT, down) }
+                    onPress = { down ->
+                        state.updateRTrigger(if (down) 1f else 0f)
+                        toggle(state, Btn.RT, down)
+                    }
                 )
             }
         }
@@ -148,6 +167,75 @@ fun XboxGamepad(
                 diameter = 124.dp
             )
         }
+
+        // ── 底部中央：VIEW / MENU ──
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SmallKey(
+                label = "VIEW",
+                pressed = state.isDown(Btn.VIEW),
+                haptic = haptic,
+                isDark = isDark,
+                onPress = { down -> toggle(state, Btn.VIEW, down) }
+            )
+            SmallKey(
+                label = "MENU",
+                pressed = state.isDown(Btn.MENU),
+                haptic = haptic,
+                isDark = isDark,
+                onPress = { down -> toggle(state, Btn.MENU, down) }
+            )
+        }
+    }
+}
+
+/** 小尺寸功能键（VIEW / MENU） */
+@Composable
+private fun SmallKey(
+    label: String,
+    pressed: Boolean,
+    haptic: HapticController,
+    isDark: Boolean,
+    onPress: (Boolean) -> Unit
+) {
+    val scale by animateFloatAsState(if (pressed) 0.90f else 1f, label = "smallKey")
+    val fill = if (isDark) {
+        Color.White.copy(alpha = if (pressed) 0.30f else 0.10f)
+    } else {
+        Color.Black.copy(alpha = if (pressed) 0.22f else 0.07f)
+    }
+    val border = if (isDark) {
+        Color.White.copy(alpha = if (pressed) 0.90f else 0.30f)
+    } else {
+        Color.Black.copy(alpha = if (pressed) 0.80f else 0.25f)
+    }
+    val shape = RoundedCornerShape(8.dp)
+
+    Box(
+        modifier = Modifier
+            .size(width = 76.dp, height = 34.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(shape)
+            .background(fill, shape)
+            .border(1.2.dp, border, shape)
+            .pressGesture(haptic, heavy = false, onPress),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (isDark) Color.White.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.75f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.SansSerif
+        )
     }
 }
 

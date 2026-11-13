@@ -68,12 +68,14 @@ B_LB = 1 << 10
 B_RB = 1 << 11
 B_L3 = 1 << 12
 B_R3 = 1 << 13
+B_VIEW = 1 << 14
+B_MENU = 1 << 15
 
 BTN_NAMES = {
     B_A: "A", B_B: "B", B_X: "X", B_Y: "Y",
     B_UP: "UP", B_DOWN: "DOWN", B_LEFT: "LEFT", B_RIGHT: "RIGHT",
     B_LT: "LT", B_RT: "RT", B_LB: "LB", B_RB: "RB",
-    B_L3: "L3", B_R3: "R3",
+    B_L3: "L3", B_R3: "R3", B_VIEW: "VIEW", B_MENU: "MENU",
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -530,22 +532,38 @@ def axis_to_xinput(v: float) -> int:
     return int(v * 32767) if v >= 0 else int(v * 32768)
 
 
-def build_report(s: dict) -> XUSB_REPORT:
+def build_report(s: dict, swap_abxy: bool = True) -> XUSB_REPORT:
     """
-    手机按键 → XInput 报告（含 A/B、X/Y 反向映射）
+    手机按键 → XInput 报告
+
+    Args:
+        s: 共享状态快照
+        swap_abxy: True 时做 A/B、X/Y 交叉映射（适配跳过关的 Switch 布局直觉）
+                   False 时一一对应
     """
     b = s["buttons"]
     wb = 0
 
-    # ── 反向映射：手机 Xbox A → 虚拟 B，B → A，X → Y，Y → X ──
-    if b & B_A:
-        wb |= XUSB_B
-    if b & B_B:
-        wb |= XUSB_A
-    if b & B_X:
-        wb |= XUSB_Y
-    if b & B_Y:
-        wb |= XUSB_X
+    # ── ABXY 映射 ──
+    if swap_abxy:
+        # 交叉：手机 A → 虚拟 B，B → A，X → Y，Y → X
+        if b & B_A:
+            wb |= XUSB_B
+        if b & B_B:
+            wb |= XUSB_A
+        if b & B_X:
+            wb |= XUSB_Y
+        if b & B_Y:
+            wb |= XUSB_X
+    else:
+        if b & B_A:
+            wb |= XUSB_A
+        if b & B_B:
+            wb |= XUSB_B
+        if b & B_X:
+            wb |= XUSB_X
+        if b & B_Y:
+            wb |= XUSB_Y
 
     # ── 其余按键正常映射 ──
     if b & B_UP:
@@ -564,9 +582,15 @@ def build_report(s: dict) -> XUSB_REPORT:
         wb |= XUSB_LEFT_THUMB
     if b & B_R3:
         wb |= XUSB_RIGHT_THUMB
+    # VIEW → BACK（Switch 的 Minus 键）, MENU → START（Switch 的 Plus 键）
+    if b & B_VIEW:
+        wb |= XUSB_BACK
+    if b & B_MENU:
+        wb |= XUSB_START
 
     rep = XUSB_REPORT()
     rep.wButtons = wb
+    # 扳机是模拟量 0~255，不是布尔键。手机端传 0.0~1.0 的浮点。
     rep.bLeftTrigger = int(max(0.0, min(1.0, s["lt"])) * 255)
     rep.bRightTrigger = int(max(0.0, min(1.0, s["rt"])) * 255)
     rep.sThumbLX = axis_to_xinput(s["lx"])
@@ -576,7 +600,8 @@ def build_report(s: dict) -> XUSB_REPORT:
     return rep
 
 
-def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event):
+def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event,
+             swap_abxy: bool = True):
     """60Hz 推送虚拟手柄状态"""
     frame = 1.0 / 60.0
     next_t = time.monotonic()
@@ -605,14 +630,14 @@ def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event)
 
         while not stop.is_set():
             s = state.snapshot()
-            rep = build_report(s)
+            rep = build_report(s, swap_abxy)
             err = gamepad.update(rep)
             frames += 1
             if frames % 300 == 0:
                 print(
                     f"[PAD] 已推送 {frames} 帧  "
-                    f"btn=0x{rep.wButtons:04X} LT={rep.bLeftTrigger} "
-                    f"LX={rep.sThumbLX} ret=0x{err:08X}",
+                    f"btn=0x{rep.wButtons:04X} LT={rep.bLeftTrigger} RT={rep.bRightTrigger} "
+                    f"L=({rep.sThumbLX},{rep.sThumbLY}) R=({rep.sThumbRX},{rep.sThumbRY}) ret=0x{err:08X}",
                     flush=True,
                 )
             if err != VIGEM_ERROR_NONE:
@@ -667,6 +692,8 @@ def main() -> int:
                     help="DSU 体感端口（默认 26760）")
     ap.add_argument("--bind", default="0.0.0.0", help="监听地址")
     ap.add_argument("--check", action="store_true", help="只检查环境后退出")
+    ap.add_argument("--no-swap", action="store_true",
+                    help="关闭 ABXY 交叉映射")
     args = ap.parse_args()
 
     print("=" * 62)
@@ -706,7 +733,7 @@ def main() -> int:
     dsu.start()
 
     pad_thread = threading.Thread(
-        target=pad_loop, args=(gamepad, state, stop),
+        target=pad_loop, args=(gamepad, state, stop, not args.no_swap),
         daemon=True, name="PAD"
     )
     pad_thread.start()
@@ -714,6 +741,7 @@ def main() -> int:
     print("\n" + "-" * 62)
     print("  就绪。请在手机上填入本机 IP，端口 %d，点「开始连接」" % args.port)
     print("  Yuzu 中把控制器设为「任意控制器」并启用体感（DSU）")
+    print("  ABXY: " + ("交叉 A->B B->A X->Y Y->X" if not args.no_swap else "一一对应"))
     print("  Ctrl+C 退出")
     print("-" * 62 + "\n")
 
@@ -739,7 +767,8 @@ def main() -> int:
                     f"[状态] 手机{online} {pps:2d}pps  "
                     f"KEY={keys:<20} "
                     f"L=({s['lx']:+.2f},{s['ly']:+.2f}) "
-                    f"R=({s['rx']:+.2f},{s['ry']:+.2f})  "
+                    f"R=({s['rx']:+.2f},{s['ry']:+.2f}) "
+                    f"TRIG={s['lt']:.2f}/{s['rt']:.2f}  "
                     f"DSU客户端={dsu.client_count} 推送={dsu.sent}"
                 )
     except KeyboardInterrupt:
