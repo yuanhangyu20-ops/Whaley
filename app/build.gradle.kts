@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.wifipad"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
     }
 
     // Release 签名。密钥随仓库一起提供，方便任何人构建同签名版本；

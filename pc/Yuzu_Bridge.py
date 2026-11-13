@@ -55,6 +55,9 @@ APP_PACKET = struct.Struct("<2sBBIQHBBbbbbhhhhhhffff")   # 52 字节（v3 含四
 APP_PACKET_V2 = struct.Struct("<2sBBIQHBBbbbbhhhhhh")     # 36 字节（v2 兼容）
 APP_MAGIC = b"WP"
 APP_VERSION = 3
+
+# 程序版本（GUI 标题与 --version 使用）
+__version__ = "1.3.0"
 APP_PACKET_SIZE = APP_PACKET.size
 APP_PACKET_SIZE_V2 = APP_PACKET_V2.size
 
@@ -1296,6 +1299,127 @@ def check_vigem_service() -> bool:
         return False
 
 
+# ==================================================================
+#  桥接服务封装：把「虚拟手柄 + DSU + 手机接收 + 自动发现」
+#  打包成一个可启停的对象，供命令行和图形界面共用。
+# ==================================================================
+
+
+class BridgeService:
+    """管理桥接的全部后台组件"""
+
+    def __init__(self, port: int = 12345, dsu_port: int = 26760,
+                 bind: str = "0.0.0.0", swap_abxy: bool = True,
+                 anchor: bool = True):
+        self.port = port
+        self.dsu_port = dsu_port
+        self.bind = bind
+        self.swap_abxy = swap_abxy
+        self.anchor_enabled = anchor
+
+        self.state = None
+        self.gamepad = None
+        self.rx = None
+        self.dsu = None
+        self.discovery = None
+
+        self._stop = threading.Event()
+        self._pad_thread = None
+        self.error = None
+        self.running = False
+
+    # ---------- 启动 ----------
+    def start(self) -> bool:
+        """启动全部组件。失败时 self.error 里是原因，返回 False。"""
+        # 1. 虚拟手柄（最可能失败的一步，先做）
+        try:
+            self.gamepad = VirtualDS4()
+        except Exception as e:
+            self.error = str(e)
+            return False
+
+        # 2. 共享状态 + 两个服务线程
+        self.state = SharedState()
+        self.rx = PhoneReceiver(self.state, port=self.port, host=self.bind)
+        self.dsu = DSUServer(self.state, port=self.dsu_port, host=self.bind,
+                             anchor_enabled=self.anchor_enabled)
+        self.rx.start()
+        self.dsu.start()
+
+        # 3. 手柄状态推送线程
+        self._pad_thread = threading.Thread(
+            target=pad_loop,
+            args=(self.gamepad, self.state, self._stop, self.swap_abxy),
+            daemon=True, name="PAD",
+        )
+        self._pad_thread.start()
+
+        # 4. 自动发现（手机点「自动搜索电脑」时应答）
+        self.discovery = DiscoveryResponder(self.port)
+        self.discovery.start()
+
+        self.running = True
+        return True
+
+    # ---------- 停止 ----------
+    def stop(self):
+        if not self.running:
+            return
+        self.running = False
+        self._stop.set()
+        for obj in (self.rx, self.dsu, self.discovery):
+            if obj is not None:
+                try:
+                    obj.stop()
+                except Exception:
+                    pass
+        if self.gamepad is not None:
+            try:
+                self.gamepad.close()
+            except Exception:
+                pass
+
+    # ---------- 状态查询（给 GUI 用）----------
+    def snapshot(self) -> dict:
+        """返回一份易读的状态快照"""
+        if self.state is None:
+            return {"running": False}
+
+        s = self.state.snapshot()
+        now = time.monotonic()
+        age = now - s["last_rx_time"] if s["last_rx_time"] else 999.0
+        online = age < 2.0
+
+        keys = ",".join(n for bit, n in BTN_NAMES.items() if s["buttons"] & bit) or "-"
+
+        anchor_deg = 0.0
+        err_deg = 0.0
+        if self.dsu is not None and s.get("has_quat"):
+            a = self.dsu.anchor
+            anchor_deg = math.degrees(a.corr_mag)
+            if a.active and a.q_ref is not None:
+                e = _q_log(_q_mul(_q_conj(a.est), a.q_ref))
+                err_deg = math.degrees(math.sqrt(sum(x * x for x in e)))
+
+        return {
+            "running": self.running,
+            "online": online,
+            "pps": s["packets"],
+            "keys": keys,
+            "mode": "Switch" if s.get("switch_mode", True) else "Xbox",
+            "motion": bool(s.get("motion_enabled", True)),
+            "has_quat": bool(s.get("has_quat")),
+            "anchor_deg": anchor_deg,
+            "err_deg": err_deg,
+            "dsu_clients": self.dsu.client_count if self.dsu else 0,
+            "dsu_sent": self.dsu.sent if self.dsu else 0,
+            "gyro": (s["gx"], s["gy"], s["gz"]),
+            "acc": (s["ax"] / GRAVITY, s["ay"] / GRAVITY, s["az"] / GRAVITY),
+            "port": self.port,
+            "dsu_port": self.dsu_port,
+        }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="WifiPad → Yuzu 综合桥接（虚拟手柄 + DSU 体感）",
@@ -1348,21 +1472,17 @@ def main() -> int:
         print("\n环境检查通过。")
         return 0
 
-    state = SharedState()
-    stop = threading.Event()
-
-    rx = PhoneReceiver(state, port=args.port, host=args.bind)
-    dsu = DSUServer(state, port=args.dsu_port, host=args.bind,
-                    anchor_enabled=not args.no_anchor)
-
-    rx.start()
-    dsu.start()
-
-    pad_thread = threading.Thread(
-        target=pad_loop, args=(gamepad, state, stop, not args.no_swap),
-        daemon=True, name="PAD"
-    )
-    pad_thread.start()
+    # 命令行模式复用 BridgeService，保证与 GUI 行为一致
+    gamepad.close()          # 刚才只用于环境检查，交给 service 重新创建
+    svc = BridgeService(port=args.port, dsu_port=args.dsu_port, bind=args.bind,
+                        swap_abxy=not args.no_swap, anchor=not args.no_anchor)
+    if not svc.start():
+        print(f"\n启动失败: {svc.error}")
+        print("无法继续，请先解决驱动问题。")
+        return 1
+    state = svc.state
+    dsu = svc.dsu
+    discovery = svc.discovery
 
     print("\n" + "-" * 62)
     lan_ips = get_all_lan_ips()
@@ -1453,5 +1573,70 @@ def main() -> int:
     return 0
 
 
+def main_gui() -> int:
+    """图形界面模式（默认）。没有 tkinter 时自动退回命令行。"""
+    _install_log_file()
+    try:
+        from gui import BridgeGUI
+    except Exception as e:
+        print(f"[警告] 无法加载图形界面（{e}），改用命令行模式")
+        return main()
+
+    # GUI 里不需要 argparse，用默认值；想改端口就用命令行参数
+    port, dsu_port, bind = 12345, 26760, "0.0.0.0"
+    swap, anchor = True, True
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--port" and i + 1 < len(argv):
+            port = int(argv[i + 1]); i += 2
+        elif a == "--dsu-port" and i + 1 < len(argv):
+            dsu_port = int(argv[i + 1]); i += 2
+        elif a == "--no-swap":
+            swap = False; i += 1
+        elif a == "--no-anchor":
+            anchor = False; i += 1
+        else:
+            i += 1
+
+    svc = BridgeService(port=port, dsu_port=dsu_port, bind=bind,
+                        swap_abxy=swap, anchor=anchor)
+
+    # 环境检查：失败也把窗口开起来，让用户看到明确的中文原因
+    vigem_ok = check_vigem_service()
+
+    app = BridgeGUI(svc)
+
+    # 把 print/stdout 接到 GUI 日志区（同时保留控制台与文件输出）
+    try:
+        from gui import _QueueWriter
+        _console = sys.stdout if sys.stdout is not None else None
+        _redirect = _QueueWriter(app.log_queue, mirror=_console)
+        sys.stdout = _redirect
+        sys.stderr = _redirect
+    except Exception:
+        pass
+
+    if not vigem_ok:
+        app.log_queue.put(
+            "[错误] 未检测到 ViGEmBus 驱动服务。\n"
+            "        请先安装：https://github.com/nefarius/ViGEmBus/releases\n"
+        )
+        app.status_lbl.configure(text="缺少 ViGEmBus 驱动，无法创建虚拟手柄")
+        app.lamp.itemconfigure(app.lamp_id, fill="#FF5C5C")
+    else:
+        app.log_queue.put("[检查] ViGEmBus 服务运行中 ✓\n")
+        app._start_service_async()
+
+    app.run()
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    # --cli / --check 走命令行；其余默认启动图形界面
+    argv = sys.argv[1:]
+    if "--cli" in argv or "--check" in argv:
+        sys.argv = [a for a in sys.argv if a != "--cli"]
+        sys.exit(main())
+    sys.exit(main_gui())
