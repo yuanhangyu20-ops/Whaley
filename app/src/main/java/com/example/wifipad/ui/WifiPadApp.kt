@@ -84,14 +84,36 @@ fun WifiPadApp() {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     // ── 网络 ──
-    var ipText by rememberSaveable { mutableStateOf("192.168.1.100") }
-    var portText by rememberSaveable { mutableStateOf(Protocol.DEFAULT_PORT.toString()) }
+    // ── 网络参数持久化（SharedPreferences，重启 App 不丢失）──
+    val prefs = remember {
+        context.getSharedPreferences("wifipad", android.content.Context.MODE_PRIVATE)
+    }
+    var ipText by rememberSaveable {
+        mutableStateOf(prefs.getString("ip", "192.168.1.100") ?: "192.168.1.100")
+    }
+    var portText by rememberSaveable {
+        mutableStateOf(prefs.getString("port", Protocol.DEFAULT_PORT.toString())
+            ?: Protocol.DEFAULT_PORT.toString())
+    }
+    // 自动保存
+    LaunchedEffect(ipText, portText) {
+        prefs.edit().putString("ip", ipText).putString("port", portText).apply()
+    }
     var sending by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("待连接") }
     var pps by remember { mutableIntStateOf(0) }
 
     WifiPadTheme(darkTheme = isDark) {
         HideSystemBars()
+
+        // ── 返回键处理：抽屉打开时关闭抽屉；否则最小化而非退出 ──
+        androidx.activity.compose.BackHandler(enabled = true) {
+            if (drawerState.isOpen) {
+                scope.launch { drawerState.close() }
+            } else {
+                (context as? Activity)?.moveTaskToBack(true)
+            }
+        }
 
         DisposableEffect(Unit) {
             motion.start()

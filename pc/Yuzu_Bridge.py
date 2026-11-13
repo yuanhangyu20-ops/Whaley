@@ -169,6 +169,11 @@ class VirtualXbox360:
 
         self._connected = True
 
+        # ── 关键：等待系统枚举完设备 ──
+        # 驱动添加目标后，XInput 需要 1~3 秒才能枚举到该设备。
+        # 若在此期间调用 update，报告会被直接丢弃（表现为手柄存在但数值永不更新）。
+        time.sleep(2.5)
+
     def _bind(self):
         d = self._dll
         d.vigem_alloc.argtypes = ()
@@ -576,20 +581,56 @@ def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event)
     frame = 1.0 / 60.0
     next_t = time.monotonic()
     errors = 0
-    while not stop.is_set():
-        s = state.snapshot()
-        rep = build_report(s)
-        err = gamepad.update(rep)
-        if err != VIGEM_ERROR_NONE:
-            errors += 1
-            if errors == 1:
-                print(f"[PAD] 更新失败: {VirtualXbox360._err_text(err)}")
-        next_t += frame
-        wait = next_t - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        else:
-            next_t = time.monotonic()
+    frames = 0
+    try:
+        # ── 启动抖动 ──
+        # XInput 对新建的 ViGEm 虚拟手柄存在缓存问题：若首帧就是全零报告，
+        # XInputGetState 可能长期返回初始的陈旧值（pack 不递增）。
+        # 先发送几次明显不同的报告，强制 XInput 刷新内部状态。
+        for jiggle in (
+            (0x1000, 32767, -32768, 32767, -32768),   # A键 + 摇杆打角
+            (0x0000, -32768, 32767, -32768, 32767),   # 反向打角
+            (0x0000, 0, 0, 0, 0),                     # 回中
+        ):
+            r = XUSB_REPORT()
+            r.wButtons = jiggle[0]
+            r.sThumbLX = jiggle[1]
+            r.sThumbLY = jiggle[2]
+            r.sThumbRX = jiggle[3]
+            r.sThumbRY = jiggle[4]
+            for _ in range(5):
+                gamepad.update(r)
+                time.sleep(0.02)
+        print("[PAD] 已发送启动抖动，XInput 状态已刷新", flush=True)
+
+        while not stop.is_set():
+            s = state.snapshot()
+            rep = build_report(s)
+            err = gamepad.update(rep)
+            frames += 1
+            if frames % 300 == 0:
+                print(
+                    f"[PAD] 已推送 {frames} 帧  "
+                    f"btn=0x{rep.wButtons:04X} LT={rep.bLeftTrigger} "
+                    f"LX={rep.sThumbLX} ret=0x{err:08X}",
+                    flush=True,
+                )
+            if err != VIGEM_ERROR_NONE:
+                errors += 1
+                if errors == 1:
+                    print(f"[PAD] 更新失败: {VirtualXbox360._err_text(err)}", flush=True)
+            next_t += frame
+            wait = next_t - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            else:
+                next_t = time.monotonic()
+    except Exception as e:
+        import traceback
+        print(f"[PAD] 线程异常退出: {e}", flush=True)
+        traceback.print_exc()
+    finally:
+        print(f"[PAD] 线程结束，共推送 {frames} 帧", flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════
