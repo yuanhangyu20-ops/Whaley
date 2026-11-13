@@ -164,9 +164,13 @@ class MotionController(private val context: Context) : SensorEventListener {
                     q0 = cur
                     qx = 0f; qy = 0f; qz = 0f; qw = 1f
                 } else {
-                    // 相对姿态 = conj(base) ⊗ cur
+                    // 相对姿态 = conj(base) ⊗ cur（手机自然方向坐标系）
                     val rel = quatMul(quatConj(base), cur)
-                    qx = rel[0]; qy = rel[1]; qz = rel[2]; qw = rel[3]
+                    // 必须再转到屏幕坐标系，否则与 rawGx/rawAx 的坐标系不一致：
+                    // 姿态锚定会用错的参考算出恒定偏差，表现成"视角匀速转圈"。
+                    val screenRel = quatMul(screenRotationQuat(), rel)
+                    qx = screenRel[0]; qy = screenRel[1]
+                    qz = screenRel[2]; qw = screenRel[3]
                 }
             }
         }
@@ -187,6 +191,31 @@ class MotionController(private val context: Context) : SensorEventListener {
     /** 四元数共轭（单位四元数的逆） */
     private fun quatConj(q: FloatArray): FloatArray =
         floatArrayOf(-q[0], -q[1], -q[2], q[3])
+
+    /**
+     * 屏幕旋转对应的四元数（绕 Z 轴），用于把姿态从自然方向转到屏幕坐标系。
+     *
+     * 与 [toScreenSpace] 的向量变换必须保持一致：
+     *   ROTATION_90  → (x,y,z) 变 (-y,x,z)，即绕 Z 轴 +90°
+     *   ROTATION_270 → (x,y,z) 变 ( y,-x,z)，即绕 Z 轴 -90°
+     *   ROTATION_180 → (x,y,z) 变 (-x,-y,z)，即绕 Z 轴 180°
+     */
+    private fun screenRotationQuat(): FloatArray =
+        when (currentRotation()) {
+            Surface.ROTATION_90 ->
+                floatArrayOf(0f, 0f, HALF_SQRT2, HALF_SQRT2)
+            Surface.ROTATION_180 ->
+                floatArrayOf(0f, 0f, 1f, 0f)
+            Surface.ROTATION_270 ->
+                floatArrayOf(0f, 0f, -HALF_SQRT2, HALF_SQRT2)
+            else ->
+                floatArrayOf(0f, 0f, 0f, 1f)
+        }
+
+    private companion object {
+        /** sin(45°) = cos(45°) = √2/2 */
+        const val HALF_SQRT2 = 0.70710677f
+    }
 
     /**
      * Android 的传感器坐标系锚定在设备的**自然方向**（竖屏）。

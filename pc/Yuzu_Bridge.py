@@ -521,7 +521,8 @@ class DSUServer(threading.Thread):
     SLOT_INDEX = 0
     SLOT_STATE_CONNECTED = 2
 
-    def __init__(self, state: SharedState, port: int = 26760, host: str = "0.0.0.0"):
+    def __init__(self, state: SharedState, port: int = 26760, host: str = "0.0.0.0",
+                 anchor_enabled: bool = True):
         super().__init__(daemon=True, name="DSU-Server")
         self.state = state
         self.port = port
@@ -538,6 +539,7 @@ class DSUServer(threading.Thread):
         self._last_push_t = None
         # 姿态锚定：抑制 DSU 客户端的积分漂移（尤其航向 yaw）
         self.anchor = AttitudeAnchor()
+        self.anchor_enabled = anchor_enabled
         self._sock: socket.socket | None = None
         self.sent = 0
 
@@ -705,7 +707,7 @@ class DSUServer(threading.Thread):
         # ── 姿态锚定（在手机坐标系里做，最后才转到 DSU 坐标系）──
         gx_r, gy_r, gz_r = s["gx"], s["gy"], s["gz"]
         anchored = False
-        if s.get("motion_enabled") and s.get("has_quat"):
+        if self.anchor_enabled and s.get("motion_enabled") and s.get("has_quat"):
             self.anchor.push_ref((s["qx"], s["qy"], s["qz"], s["qw"]))
             (gx_r, gy_r, gz_r), anchored = self.anchor.correct(
                 (gx_r, gy_r, gz_r), now_t)
@@ -1074,6 +1076,8 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="只检查环境后退出")
     ap.add_argument("--no-swap", action="store_true",
                     help="关闭 ABXY 交叉映射")
+    ap.add_argument("--no-anchor", action="store_true",
+                    help="禁用姿态锚定（视角出现异常匀速旋转时使用）")
     args = ap.parse_args()
 
     print("=" * 62)
@@ -1107,7 +1111,8 @@ def main() -> int:
     stop = threading.Event()
 
     rx = PhoneReceiver(state, port=args.port, host=args.bind)
-    dsu = DSUServer(state, port=args.dsu_port, host=args.bind)
+    dsu = DSUServer(state, port=args.dsu_port, host=args.bind,
+                    anchor_enabled=not args.no_anchor)
 
     rx.start()
     dsu.start()
@@ -1122,6 +1127,7 @@ def main() -> int:
     print("  就绪。请在手机上填入本机 IP，端口 %d，点「开始连接」" % args.port)
     print("  Yuzu 中把控制器设为「任意控制器」并启用体感（DSU）")
     print("  ABXY: " + ("交叉 A->B B->A X->Y Y->X" if not args.no_swap else "一一对应"))
+    print("  姿态锚定: " + ("关闭" if args.no_anchor else "开启（抑制航向漂移）"))
     print("  Ctrl+C 退出")
     print("-" * 62 + "\n")
 
