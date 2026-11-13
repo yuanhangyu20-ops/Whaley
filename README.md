@@ -114,7 +114,7 @@ sc query ViGEmBus
 **方式 A：免安装 exe（推荐，不用装 Python）**
 
 从 [Releases](https://github.com/yuanhangyu20-ops/WifiPad-Android/releases)
-下载 **`JingXiaoYou-Bridge.exe`**（即鲸小游桥接），**双击运行**。
+下载 **`Whaley-Bridge.exe`**（即鲸小游桥接），**双击运行**。
 
 它带一个**图形控制面板**，不需要看命令行：
 

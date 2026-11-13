@@ -57,7 +57,7 @@ APP_MAGIC = b"WP"
 APP_VERSION = 3
 
 # 程序版本（GUI 标题与 --version 使用）
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 APP_PACKET_SIZE = APP_PACKET.size
 APP_PACKET_SIZE_V2 = APP_PACKET_V2.size
 

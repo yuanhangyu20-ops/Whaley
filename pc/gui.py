@@ -309,16 +309,13 @@ class BridgeGUI:
         # 状态灯：手机在线且 Yuzu 已订阅 = 绿色；部分就绪 = 黄色；都没有 = 红
         if online and clients > 0:
             self.lamp.itemconfigure(self.lamp_id, fill=OK_COLOR)
-            self.status_lbl.configure(
-                text=f"一切就绪 · Yuzu 已连接 · 手机 {st['pps']} pps", fg=OK_COLOR)
+            self.status_lbl.configure(text="一切就绪", fg=OK_COLOR)
         elif online:
             self.lamp.itemconfigure(self.lamp_id, fill=WARN)
-            self.status_lbl.configure(
-                text="手机已连接，等待 Yuzu 打开控制设置以订阅体感", fg=WARN)
+            self.status_lbl.configure(text="手机已连接", fg=WARN)
         else:
             self.lamp.itemconfigure(self.lamp_id, fill=ERR)
-            self.status_lbl.configure(
-                text="等待手机连接…（在手机上点「开始连接」）", fg=FG_DIM)
+            self.status_lbl.configure(text="等待手机连接", fg=FG_DIM)
 
         # IP
         try:
