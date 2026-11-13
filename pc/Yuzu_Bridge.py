@@ -314,15 +314,17 @@ class SharedState:
 #  DSU / Cemuhook 服务端
 # ══════════════════════════════════════════════════════════════════
 
-DSU_MAGIC = b"DSUC"
+DSU_MAGIC_CLIENT = b"DSUC"   # 客户端 → 服务器
+DSU_MAGIC_SERVER = b"DSUS"   # 服务器 → 客户端（必须用这个，之前用 DSUC 是错的）
 DSU_PROTOCOL_VERSION = 1001
 
-DSUS_MSG_VERSION_REQ = 0x100000
-DSUS_MSG_VERSION_RESP = 0x100001
-DSUS_MSG_PORTS_REQ = 0x100100
-DSUS_MSG_PORTS_RESP = 0x100101
-DSUS_MSG_DATA = 0x100002
-DSUS_MSG_DATA_REQ = 0x100200
+# 消息类型：Cemuhook 的请求与响应共用同一 type
+DSUS_MSG_VERSION = 0x100000     # 版本握手
+DSUS_MSG_PORTS = 0x100001       # 端口列表
+DSUS_MSG_DATA = 0x100002        # 手柄数据（也是订阅请求）
+
+# 兼容旧式命名（部分实现把端口请求写成 0x100100）
+DSUS_MSG_PORTS_LEGACY = 0x100100
 
 DSU_HEADER = struct.Struct("<4sHHIII")   # 20 字节
 
@@ -332,10 +334,18 @@ GRAVITY = 9.80665               # m/s² → g
 
 
 def dsu_build(server_id: int, msg_type: int, payload: bytes) -> bytes:
-    """构造 DSU 包（含 CRC32）"""
+    """
+    构造 DSU 包（服务器 → 客户端）。
+
+    关键细节（对齐 PhoneGyro 的实测实现）：
+      · magic 必须是 "DSUS"，不是 "DSUC"
+      · length 字段 = payload 长度 + 4（msgType），**不是**整包长度
+      · CRC32 对整包计算，计算时 CRC 字段本身保持 0
+    """
+    length = len(payload) + 4
     total = DSU_HEADER.size + len(payload)
     header = DSU_HEADER.pack(
-        DSU_MAGIC, DSU_PROTOCOL_VERSION, total, 0, server_id, msg_type
+        DSU_MAGIC_SERVER, DSU_PROTOCOL_VERSION, length, 0, server_id, msg_type
     )
     raw = header + payload
     crc = zlib.crc32(raw) & 0xFFFFFFFF
@@ -413,48 +423,71 @@ class DSUServer(threading.Thread):
             magic, proto, size, crc, server_id, msg = DSU_HEADER.unpack_from(data, 0)
         except struct.error:
             return
-        if magic != DSU_MAGIC:
+        if magic != DSU_MAGIC_CLIENT:
             return
 
-        # 诊断：记录每种消息类型的首次出现，便于确认 Yuzu 是否真的在连接
-        if not hasattr(self, "_seen_msgs"):
-            self._seen_msgs = set()
-        if msg not in self._seen_msgs:
+        if msg not in getattr(self, "_seen_msgs", set()):
+            if not hasattr(self, "_seen_msgs"):
+                self._seen_msgs = set()
             self._seen_msgs.add(msg)
             names = {
-                0x100000: "VERSION_REQ", 0x100001: "VERSION_RESP",
-                0x100100: "PORTS_REQ", 0x100101: "PORTS_RESP",
-                0x100002: "DATA", 0x100200: "DATA_REQ",
+                0x100000: "VERSION", 0x100001: "PORTS",
+                0x100002: "DATA/SUBSCRIBE", 0x100100: "PORTS(legacy)",
             }
-            print(f"[DSU] 收到包 type=0x{msg:06X} ({names.get(msg, '?')}) "
-                  f"len={len(data)} from {addr[0]}:{addr[1]} "
-                  f"hex={data[:24].hex()}", flush=True)
+            print(f"[DSU] 收到 {names.get(msg, f'0x{msg:06X}')} "
+                  f"from {addr[0]}:{addr[1]}", flush=True)
 
-        if msg == DSUS_MSG_VERSION_REQ:
-            payload = struct.pack("<H", DSU_PROTOCOL_VERSION)
+        # ── 版本握手（响应 type 与请求相同：0x100000）──
+        if msg == DSUS_MSG_VERSION:
+            buf = bytearray(24)
+            struct.pack_into("<HHIII", buf, 4, DSU_PROTOCOL_VERSION, 8, 0, self._server_id, 0)
+            buf[0:4] = DSU_MAGIC_SERVER
+            struct.pack_into("<I", buf, 16, DSUS_MSG_VERSION)
+            struct.pack_into("<H", buf, 20, DSU_PROTOCOL_VERSION)
+            crc = zlib.crc32(bytes(buf)) & 0xFFFFFFFF
+            struct.pack_into("<I", buf, 8, crc)
             try:
-                sock.sendto(dsu_build(self._server_id, DSUS_MSG_VERSION_RESP, payload), addr)
+                sock.sendto(bytes(buf), addr)
             except OSError:
                 pass
 
-        elif msg == DSUS_MSG_PORTS_REQ:
-            payload = struct.pack("<BB", 1, self.SLOT_INDEX)
-            payload += struct.pack("<B", self.SLOT_STATE_CONNECTED)
+        # ── 端口列表（响应 type 同为 0x100001；兼容旧式 0x100100 请求）──
+        elif msg in (DSUS_MSG_PORTS, DSUS_MSG_PORTS_LEGACY):
+            payload = bytearray(12)
+            payload[0] = self.SLOT_INDEX
+            payload[1] = self.SLOT_STATE_CONNECTED
+            payload[2] = 2              # model = 完整陀螺仪
+            payload[3] = 2              # conn_type = 无线
+            payload[10] = 5             # battery = 满电
+            payload[11] = 1             # is_active
+            resp = dsu_build(self._server_id, DSUS_MSG_PORTS, bytes(payload))
+            # length 字段必须是 12+4
+            resp = resp[:6] + struct.pack("<H", 16) + resp[8:]
+            crc = zlib.crc32(resp[:8] + b"\x00\x00\x00\x00" + resp[12:]) & 0xFFFFFFFF
+            resp = resp[:8] + struct.pack("<I", crc) + resp[12:]
             try:
-                sock.sendto(dsu_build(self._server_id, DSUS_MSG_PORTS_RESP, payload), addr)
+                sock.sendto(resp, addr)
             except OSError:
                 pass
 
-        elif msg == DSUS_MSG_DATA_REQ:
+        # ── 数据请求 = 订阅 ──
+        elif msg == DSUS_MSG_DATA:
             with self._clients_lock:
                 if addr not in self._clients:
                     self._clients[addr] = self.SLOT_INDEX
                     print(f"[DSU] Yuzu 已订阅 ← {addr[0]}:{addr[1]}  "
                           f"(共 {len(self._clients)} 个客户端)", flush=True)
+            # 新订阅者立刻收到一帧静止数据，避免客户端等下一轮
+            try:
+                sock.sendto(self._make_data_packet(), addr)
+            except OSError:
+                pass
 
     # ── 推送线程 ──
     def _push_loop(self):
-        frame = 1.0 / 60.0
+        # 与手机 120Hz 发送率对齐：每一帧新鲜数据都尽快转给 Yuzu，
+        # 避免 60Hz 时最多再等 16.7ms 才发出。
+        frame = 1.0 / 120.0
         next_t = time.monotonic()
         while not self._stop.is_set():
             with self._clients_lock:
@@ -488,43 +521,60 @@ class DSUServer(threading.Thread):
     def _make_data_packet(self) -> bytes:
         s = self.state.snapshot()
         self._packet_no = (self._packet_no + 1) & 0xFFFFFFFF
-        # 用单调时钟：Yuzu 以 timestamp 差值积分角速度，系统时钟跳变会让
-        # 体感突然停顿或抖动。monotonic 保证严格递增且不受时钟同步影响。
         ts_us = int(time.monotonic() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
 
-        # 单位换算：m/s² → g，rad/s → deg/s
-        ax, ay, az = s["ax"] / GRAVITY, s["ay"] / GRAVITY, s["az"] / GRAVITY
-        gp, gy, gr = s["gx"] * RAD2DEG, s["gy"] * RAD2DEG, s["gz"] * RAD2DEG
+        # ── 单位换算：m/s² → g，rad/s → deg/s ──
+        mx = s["ax"] / GRAVITY      # 手机坐标：X 右
+        my = s["ay"] / GRAVITY      #           Y 上
+        mz = s["az"] / GRAVITY      #           Z 屏幕外
+        mgx = s["gx"] * RAD2DEG     # 绕 X（前后倾）
+        mgy = s["gy"] * RAD2DEG     # 绕 Y（左右转）
+        mgz = s["gz"] * RAD2DEG     # 绕 Z（屏幕内旋转）
 
-        # ── Cemuhook DSU pad data 负载（80 字节）──
-        # 偏移  字段            说明
-        #   0   slot            手柄槽位 0-3
-        #   1   slot_state      2 = 已连接
-        #   2   model           2 = 完整陀螺仪
-        #   3   battery         0xEF = 未知
-        #   4   is_active       1 = 活跃
-        #   5   packet_number   u32，递增
-        #   9   mac[6]          伪造的 MAC
-        #  15   timestamp       u64 微秒
-        #  23   accel[3]        float，单位 g
-        #  35   gyro[3]         float，单位 deg/s
-        #  47   unk[3]          保留
-        #  59   touch[12]       保留（无触摸）
-        #  71.. padding 到 80
-        payload = struct.pack("<BB", self.SLOT_INDEX, self.SLOT_STATE_CONNECTED)
-        payload += struct.pack("<B", 2)              # model = 完整陀螺仪
-        payload += struct.pack("<B", 0xEF)           # battery = 未知
-        payload += struct.pack("<B", 1)              # is_active
-        payload += struct.pack("<I", self._packet_no)
-        payload += b"\x00\x00\x00\x00\x00\x00"       # MAC 占位
-        payload += struct.pack("<Q", ts_us)
-        payload += struct.pack("<fff", ax, ay, az)   # 加速度（g）
-        payload += struct.pack("<fff", gp, gy, gr)   # 陀螺仪（deg/s）
-        payload += struct.pack("<fff", 0.0, 0.0, 0.0)
-        payload += b"\x00" * 12                      # 触摸数据
-        payload += b"\x00" * 9                       # 补齐到 80 字节
+        # ── 坐标系转换：手机 → DSU/Switch Pro Controller ──
+        # PadTest 验证的 DSU 约定（见 PhoneGyro docs/motion-pipeline §7）：
+        #   平放时 AccY = -1g，即 Y 轴指向重力方向
+        # 手机平放时 mz = +1g（Z 朝上），所以 DSU 的 Y 取 -mz。
+        # 再叠加上 DSU 客户端的符号修正：RotY 取反、AccX 取反、AccZ 取反，
+        # 否则会出现偏航镜像、保持倾斜时角度缓慢回爬。
+        ax = -mx                    # AccX 取反
+        ay = -mz                    # 重力 -> Y 轴，平放得 -1g
+        az = -my                    # AccZ 取反（原 Y 轴）
 
-        return dsu_build(self._server_id, DSUS_MSG_DATA, payload)
+        gp = mgx                    # RotX = 绕 X
+        gy = mgz                    # RotY = 绕 Z 经取反
+        gr = mgy                    # RotZ = 绕 Y
+
+        # ── 80 字节 payload（偏移与 Cemuhook/PhoneGyro 一致）──
+        #   p[0]      slot
+        #   p[1]      slot_state      2 = 已连接
+        #   p[2]      model           2 = 完整陀螺仪手柄
+        #   p[3]      conn_type       2 = 蓝牙/无线
+        #   p[4:10]   mac
+        #   p[10]     battery
+        #   p[11]     is_active       1
+        #   p[12:16]  packet_number
+        #   p[20:24]  四根摇杆轴（128 = 中位）
+        #   p[48:56]  timestamp u64 微秒   ← 客户端按此差值积分角速度
+        #   p[56:68]  加速度 float32×3   单位 g
+        #   p[68:80]  角速度 float32×3   单位 deg/s
+        p = bytearray(80)
+        p[0] = self.SLOT_INDEX
+        p[1] = self.SLOT_STATE_CONNECTED
+        p[2] = 2                      # model = 完整陀螺仪手柄
+        p[3] = 2                      # conn_type = 无线
+        p[10] = 5                     # battery = 满电
+        p[11] = 1                     # is_active
+        struct.pack_into("<I", p, 12, self._packet_no)
+        p[20] = 128                   # 左摇杆 X（按键/摇杆走 DS4，这里保持中位）
+        p[21] = 128
+        p[22] = 128
+        p[23] = 128
+        struct.pack_into("<Q", p, 48, ts_us)
+        struct.pack_into("<fff", p, 56, ax, ay, az)     # 加速度（g）
+        struct.pack_into("<fff", p, 68, gp, gy, gr)     # 角速度（deg/s）
+
+        return dsu_build(self._server_id, DSUS_MSG_DATA, bytes(p))
 
     def stop(self):
         self._stop.set()

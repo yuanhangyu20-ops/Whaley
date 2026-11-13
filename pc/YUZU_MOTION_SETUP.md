@@ -293,3 +293,64 @@ python motion_viewer.py
 ```
 
 看到数值随手机倾斜实时变化 → 手机到电脑的体感链路 100% 正常。
+
+---
+
+## 九、DSU 协议细节（借鉴 PhoneGyro）
+
+本项目 DSU 编码器在排查体感不准时，参照了开源项目
+[MrHoustonOff/PhoneGyro](https://github.com/MrHoustonOff/PhoneGyro)（MIT 协议）
+以及它的 `docs/motion-pipeline.en.md`。以下是从中确认并落地的关键点：
+
+### 9.1 之前实现的三个错误
+
+| 项目 | 之前（错） | 正确 | 后果 |
+|---|---|---|---|
+| magic | `DSUC` | **`DSUS`**（服务器→客户端）| 客户端可能不认该包 |
+| length 字段 | 整包长度 100 | **payload+4 = 84** | 解析长度错乱 |
+| 消息类型 | 0x100001 作版本响应 | **请求/响应共用 type** | 握手语义错 |
+
+### 9.2 正确的 pad data 布局（80 字节 payload）
+
+```
+p[0]      slot                0
+p[1]      slot_state          2 = 已连接
+p[2]      model               2 = 完整陀螺仪手柄
+p[3]      conn_type           2 = 无线
+p[4:10]   mac
+p[10]     battery             5 = 满电
+p[11]     is_active           1
+p[12:16]  packet_number
+p[20:24]  四根摇杆轴（128=中位）
+p[48:56]  timestamp  u64 微秒  ← 客户端按此差值积分角速度
+p[56:68]  accel      f32×3，单位 g
+p[68:80]  gyro       f32×3，单位 deg/s
+```
+
+### 9.3 坐标系与符号
+
+PadTest 验证过的 DSU 约定是**平放时 `AccY = -1 g`**（Y 轴指向重力方向）。
+手机坐标是 (X右, Y上, Z屏幕外)，需转换：
+
+```
+DSU_Acc  = (-mx, -mz, -my)
+DSU_Gyro = ( mgx,  mgz,  mgy)
+```
+
+其中 `RotY`、`AccX`、`AccZ` 还要取反（PhoneGyro 的 `DSUYawSign`/`DSUAccSign`），
+否则会出现**偏航镜像**和**保持倾斜角度时缓慢回爬**。
+
+### 9.4 其它借鉴的设计
+
+- **No gyro smoothing**：文档明确"任何对角速度的低通都会增加延迟，客户端积分后会超调"。
+  所以我们直接发原始传感器值。
+- **时间戳是"积分时钟"**：步进必须等于速率平均所覆盖的间隔，否则积分有误差。
+  本项目用 `time.monotonic()`，保证严格递增且不受系统时钟跳变影响。
+- **发送率**：手机 120Hz、DSU 120Hz，减少每一级最多 16.7ms 的等待。
+
+### 9.5 尚未移植的部分
+
+PhoneGyro 的**姿态锚定**（`motion/attitudeanchor.go`）能压制 DSU 客户端积分漂移
+（60 秒快速运动：无修正漂移 34.5°，有修正 0.1°）。它需要手机提供四元数
+（`deviceorientation`）并在服务器维护一个"客户端将达到的姿态"模型，工程量较大，
+暂未实现。若后续发现长时间玩有累积偏移，再移植。
