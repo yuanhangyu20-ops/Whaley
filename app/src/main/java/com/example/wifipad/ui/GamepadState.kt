@@ -8,8 +8,7 @@ import com.example.wifipad.net.Protocol
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * 按键 ID 常量。
- * 这些 ID 后续会直接用于 UDP 协议，与 PC 端保持一一对应。
+ * 按键 ID 常量（与 UDP 协议位一一对应）。
  */
 object Btn {
     const val A = 1
@@ -22,12 +21,17 @@ object Btn {
     const val DPAD_RIGHT = 8
     const val LT = 9
     const val RT = 10
+    const val LB = 11
+    const val RB = 12
+    const val L3 = 13
+    const val R3 = 14
 
     val names: Map<Int, String> = mapOf(
         A to "A", B to "B", X to "X", Y to "Y",
         DPAD_UP to "UP", DPAD_DOWN to "DOWN",
         DPAD_LEFT to "LEFT", DPAD_RIGHT to "RIGHT",
-        LT to "LT", RT to "RT"
+        LT to "LT", RT to "RT", LB to "LB", RB to "RB",
+        L3 to "L3", R3 to "R3"
     )
 
     fun protocolBit(id: Int): Int = when (id) {
@@ -41,6 +45,10 @@ object Btn {
         DPAD_RIGHT -> Protocol.B_RIGHT
         LT -> Protocol.B_LT
         RT -> Protocol.B_RT
+        LB -> Protocol.B_LB
+        RB -> Protocol.B_RB
+        L3 -> Protocol.B_L3
+        R3 -> Protocol.B_R3
         else -> 0
     }
 }
@@ -49,14 +57,22 @@ object Btn {
  * 虚拟手柄运行时状态。
  *
  * Compose 状态用于 UI 渲染；
- * 另外维护一份线程安全的快照（AtomicInteger 位掩码 + @Volatile 数值），
- * 供 60Hz UDP 发送线程读取，避免跨线程访问 Compose 集合。
+ * 另维护线程安全快照（AtomicInteger 位掩码 + @Volatile 数值）供 60Hz UDP 线程读取。
  */
 class GamepadState {
+
+    // ── 左摇杆 ──
     var stickX by mutableFloatStateOf(0f)
         private set
     var stickY by mutableFloatStateOf(0f)
         private set
+
+    // ── 右摇杆（实体）──
+    var rStickX by mutableFloatStateOf(0f)
+        private set
+    var rStickY by mutableFloatStateOf(0f)
+        private set
+
     var lTrigger by mutableFloatStateOf(0f)
         private set
     var rTrigger by mutableFloatStateOf(0f)
@@ -76,6 +92,14 @@ class GamepadState {
         private set
 
     @Volatile
+    var netRStickX = 0f
+        private set
+
+    @Volatile
+    var netRStickY = 0f
+        private set
+
+    @Volatile
     var netLTrigger = 0f
         private set
 
@@ -88,6 +112,13 @@ class GamepadState {
         stickY = y
         netStickX = x
         netStickY = y
+    }
+
+    fun setRightStick(x: Float, y: Float) {
+        rStickX = x
+        rStickY = y
+        netRStickX = x
+        netRStickY = y
     }
 
     fun updateLTrigger(value: Float) {
@@ -117,7 +148,7 @@ class GamepadState {
     fun pressedIds(): List<Int> = pressed.toList()
 
     fun pressedLabels(): String =
-        pressed.map { Btn.names[it] ?: it.toString() }.joinToString(",")
+        pressed.map { Btn.names[it] ?: it.toString() }.joinToString(", ")
 
     /** 当前按键位掩码（供网络层读取） */
     fun currentButtonMask(): Int = buttonMask.get()
