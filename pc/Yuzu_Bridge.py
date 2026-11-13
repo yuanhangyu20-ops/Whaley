@@ -472,13 +472,19 @@ class AttitudeAnchor:
         self.q_ref = None                 # 手机相对姿态
         self.last_t = None
         self.active = False
-        self.corr_mag = 0.0               # 当前修正强度（rad/s），供诊断
+        self.corr_mag = 0.0
+        self.last_q = None               # 当前修正强度（rad/s），供诊断
 
     def reset(self):
         self.est = (0.0, 0.0, 0.0, 1.0)
         self.last_t = None
         self.active = False
         self.corr_mag = 0.0
+        self.last_q = None
+        self.last_q = None
+
+    # 四元数突变阈值：超过它说明手机换了基准（用户点了"设正面"或重连）
+    Q_JUMP_THRESH = 0.30
 
     def push_ref(self, q):
         """更新手机姿态参考"""
@@ -487,7 +493,23 @@ class AttitudeAnchor:
         n = _q_norm(q)
         if n < 1e-6:
             return
-        self.q_ref = _q_normalize(q)
+        q = _q_normalize(q)
+
+        # 检测手机端「重新居中」：q 会瞬间跳回单位四元数附近。
+        # 此时把 est 也同步到新基准，画面才会真的回到正前方，
+        # 否则锚定会拿旧基准去纠正，方向还是错的。
+        if self.last_q is not None:
+            d = math.sqrt(sum((q[i] - self.last_q[i]) ** 2 for i in range(4)))
+            if d > self.Q_JUMP_THRESH:
+                self.est = q
+                self.q_ref = q
+                self.last_q = q
+                self.last_t = None
+                print("[锚定] 检测到手机重新居中，基准已同步", flush=True)
+                return
+        self.last_q = q
+
+        self.q_ref = q
         # 首帧或参考归零时同步 est，避免一上来就产生巨大修正
         if not self.active:
             self.est = self.q_ref

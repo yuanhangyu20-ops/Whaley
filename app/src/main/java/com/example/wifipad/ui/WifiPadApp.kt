@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -211,6 +212,7 @@ fun WifiPadApp() {
                             onDarkChange = { isDark = it },
                             motionEnabled = motionEnabled,
                             onMotionChange = { motionEnabled = it },
+                            onRecenter = { motion.recenter() },
                             switchMode = switchMode,
                             onSwitchModeChange = { switchMode = it },
                             ip = ipText,
@@ -281,6 +283,7 @@ private fun SettingsDrawer(
     onDarkChange: (Boolean) -> Unit,
     motionEnabled: Boolean,
     onMotionChange: (Boolean) -> Unit,
+    onRecenter: () -> Unit,
     switchMode: Boolean,
     onSwitchModeChange: (Boolean) -> Unit,
     ip: String,
@@ -372,6 +375,19 @@ private fun SettingsDrawer(
                 }
                 Switch(checked = motionEnabled, onCheckedChange = onMotionChange)
             }
+
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(
+                onClick = onRecenter,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("把当前姿态设为正面", style = MaterialTheme.typography.labelLarge)
+            }
+            Text(
+                "手机摆正后点一下，游戏里的视角会重新回到正前方",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
 

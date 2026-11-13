@@ -111,6 +111,19 @@ class MotionController(private val context: Context) : SensorEventListener {
         sensorManager.unregisterListener(this)
     }
 
+    /**
+     * 重新居中：把「当前手机的朝向」当作新的零点。
+     *
+     * 用途：yaw（水平朝向）没有绝对参考 —— 重力只能判断是否水平，不能
+     * 判断朝哪边。快速转动后把手机放回桌面，若摆放角度与之前不同，
+     * 游戏里就会保持那个偏角。调用本方法后相对四元数归零，PC 端的
+     * 姿态锚定会把画面重新拉回正前方。
+     */
+    fun recenter() {
+        q0 = null
+        qx = 0f; qy = 0f; qz = 0f; qw = 1f
+    }
+
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
