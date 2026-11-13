@@ -368,6 +368,11 @@ class DSUServer(threading.Thread):
         self._clients_lock = threading.Lock()
         self._packet_no = 0
         self._server_id = int(time.time()) & 0xFFFFFFFF
+        # DSU 时间戳必须是一个「积分时钟」：从 0 起算，每帧累加真实间隔。
+        # 若直接用 monotonic() 的绝对值（系统启动以来的微秒，可达 1e10），
+        # 客户端第一帧拿到的 delta 就是天文数字，角速度积分直接爆掉。
+        self._ts_us = 0
+        self._last_push_t = None
         self._sock: socket.socket | None = None
         self.sent = 0
 
@@ -521,7 +526,16 @@ class DSUServer(threading.Thread):
     def _make_data_packet(self) -> bytes:
         s = self.state.snapshot()
         self._packet_no = (self._packet_no + 1) & 0xFFFFFFFF
-        ts_us = int(time.monotonic() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
+        # 积分时钟：首帧按标准 60Hz 间隔起算，之后累加真实推送间隔。
+        now_t = time.monotonic()
+        if self._last_push_t is None:
+            self._ts_us += 16667          # 16.667ms ≈ 60Hz
+        else:
+            delta = int((now_t - self._last_push_t) * 1_000_000)
+            # 夹在 [100µs, 100ms]：太小的抖动用最小值，长时间停顿也不至于爆掉
+            self._ts_us += max(100, min(delta, 100_000))
+        self._last_push_t = now_t
+        ts_us = self._ts_us & 0xFFFFFFFFFFFFFFFF
 
         # ── 单位换算：m/s² → g，rad/s → deg/s ──
         mx = s["ax"] / GRAVITY      # 手机坐标：X 右
