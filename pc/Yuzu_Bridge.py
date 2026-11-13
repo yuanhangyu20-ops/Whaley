@@ -496,18 +496,13 @@ class AttitudeAnchor:
         if dt > 0.1:
             return gyro_rad, False
 
-        # 1. est 按当前角速度前进
-        self.est = _q_normalize(
-            _q_mul(self.est, _q_exp((gyro_rad[0] * dt,
-                                     gyro_rad[1] * dt,
-                                     gyro_rad[2] * dt)))
-        )
-
-        # 2. 误差 = log(conj(est) ⊗ q_ref)
+        # 1. 误差 = log(conj(est) ⊗ q_ref)，est 是上一帧结束时客户端的姿态
         err = _q_log(_q_mul(_q_conj(self.est), self.q_ref))
 
-        # 3. 换算成角速度并限幅
-        corr = [2.0 * e / dt for e in err]
+        # 2. 修正量就是 2*err（单位 rad/s），**不要除以 dt**
+        #    除以 dt 会把修正放大 (1/dt) 倍：dt≈8ms 时放大 125 倍，
+        #    0.08° 的微小误差就会顶到 20°/s 上限，表现为画面被持续拖着转。
+        corr = [2.0 * e for e in err]
         mag = math.sqrt(corr[0] ** 2 + corr[1] ** 2 + corr[2] ** 2)
         if mag > self.MAX_CORR:
             k = self.MAX_CORR / mag
@@ -515,9 +510,17 @@ class AttitudeAnchor:
             mag = self.MAX_CORR
         self.corr_mag = mag
 
-        return (gyro_rad[0] + corr[0],
-                gyro_rad[1] + corr[1],
-                gyro_rad[2] + corr[2]), True
+        out = (gyro_rad[0] + corr[0],
+               gyro_rad[1] + corr[1],
+               gyro_rad[2] + corr[2])
+
+        # 3. est 必须用**实际发出的**角速度（含修正）推进，
+        #    否则它模拟的不是客户端的真实积分，误差会算偏。
+        self.est = _q_normalize(
+            _q_mul(self.est, _q_exp((out[0] * dt, out[1] * dt, out[2] * dt)))
+        )
+
+        return out, True
 
 
 class DSUServer(threading.Thread):
@@ -1210,8 +1213,18 @@ def main() -> int:
                 mode = "Switch" if s.get("switch_mode", True) else "Xbox"
                 mot = "开" if s.get("motion_enabled", True) else "关"
                 anchor_txt = "—"
+                quat_txt = "—"
                 if s.get("has_quat"):
-                    anchor_txt = f"{math.degrees(dsu.anchor.corr_mag):.1f}°/s"
+                    a = dsu.anchor
+                    anchor_txt = f"{math.degrees(a.corr_mag):.1f}°/s"
+                    # 误差角：est 与 q_ref 的偏离（度）
+                    if a.active and a.q_ref is not None:
+                        e = _q_log(_q_mul(_q_conj(a.est), a.q_ref))
+                        err_deg = math.degrees(math.sqrt(sum(x*x for x in e)))
+                    else:
+                        err_deg = 0.0
+                    quat_txt = (f"q=({s['qx']:+.3f},{s['qy']:+.3f},{s['qz']:+.3f},{s['qw']:+.3f}) "
+                                f"误差={err_deg:.1f}°")
                 print(
                     f"[状态] 手机{online} {pps:2d}pps  模式={mode} 体感={mot}  "
                     f"姿态={'有' if s.get('has_quat') else '无'} 锚定={anchor_txt}  "
@@ -1228,6 +1241,8 @@ def main() -> int:
                     f"ACC=({s['ax']/9.80665:+.2f},{s['ay']/9.80665:+.2f},"
                     f"{s['az']/9.80665:+.2f}) g"
                 )
+                if s.get("has_quat"):
+                    print(f"        {quat_txt}")
     except KeyboardInterrupt:
         print("\n[退出] 正在关闭…")
     finally:
