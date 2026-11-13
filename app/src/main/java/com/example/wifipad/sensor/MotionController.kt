@@ -94,17 +94,32 @@ class MotionController(private val context: Context) : SensorEventListener {
     val available: Boolean get() = gyroscope != null
 
     fun start() {
-        // FASTEST：由硬件决定最高频率（通常 100~200Hz），远高于 DSU 的 60Hz
-        accelerometer?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
-        }
-        gyroscope?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
-        }
-        rotationSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
-        }
+        // 逐个安全注册：设备可能根本没有该传感器，
+        // 也可能因为厂商限制或缺少 HIGH_SAMPLING_RATE_SENSORS 权限
+        // 而拒绝 FASTEST 采样率。任何情况下都不允许崩溃。
+        safeRegister(accelerometer)
+        safeRegister(gyroscope)
+        safeRegister(rotationSensor)
         q0 = null
+    }
+
+    /**
+     * 注册传感器，带三级降级：
+     *   FASTEST → GAME → 放弃
+     * 全程吞掉异常，保证老旧设备 / 权限受限设备不会因为体感闪退。
+     */
+    private fun safeRegister(sensor: Sensor?) {
+        val s = sensor ?: return
+        for (rate in intArrayOf(SensorManager.SENSOR_DELAY_FASTEST,
+                                SensorManager.SENSOR_DELAY_GAME)) {
+            try {
+                if (sensorManager.registerListener(this, s, rate)) return
+            } catch (e: SecurityException) {
+                // 缺少高采样率权限，继续尝试下一档
+            } catch (e: Exception) {
+                // 其它厂商实现异常，同样降级
+            }
+        }
     }
 
     fun stop() {

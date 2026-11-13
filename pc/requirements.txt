@@ -1,0 +1,31 @@
+# 鲸小游 · PC 桥接程序 —— Python 依赖清单
+# ============================================
+#
+# ✅ 好消息：本项目【不需要任何第三方库】。
+#
+# 桥接脚本 Yuzu_Bridge.py 只用 Python 标准库：
+#     argparse  ctypes  math  os  socket  struct  sys  threading  time  zlib
+#
+# 虚拟手柄通过 ctypes 直接调用同目录下的 ViGEmClient.dll，
+# 因此无需 vgamepad、pygame、pywin32 等任何外部包。
+#
+# 这意味着 `pip install -r requirements.txt` 不会下载任何东西，
+# 也不会有 Python 版本兼容问题（vgamepad 长期缺少新版 Python 的 wheel）。
+#
+#
+# 【系统级前置条件】（不是 pip 包，必须单独安装）
+# ------------------------------------------------------------
+#   1. ViGEmBus 驱动  ← 必需，否则无法创建虚拟手柄
+#      下载: https://github.com/nefarius/ViGEmBus/releases
+#      验证: sc query ViGEmBus   →  STATE : 4  RUNNING
+#
+#   2. ViGEmClient.dll  ← 必需，已随仓库放在 pc/ 目录下
+#
+#
+# 【可选】如果你想用 vgamepad 库替代原生 ctypes 调用
+# ------------------------------------------------------------
+# 本项目不依赖它，仅作为备选方案记录。注意 vgamepad 对 Python 版本
+# 较敏感，Python 3.13+ 可能没有预编译 wheel。
+#
+# vgamepad>=0.1.0
+#

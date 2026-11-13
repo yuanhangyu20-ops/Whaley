@@ -118,6 +118,11 @@ fun WifiPadApp() {
             .apply()
     }
 
+    // 设备没有陀螺仪时强制关闭体感，避免开关处于「开」却永远无数据
+    LaunchedEffect(motion.available) {
+        if (!motion.available) motionEnabled = false
+    }
+
     WifiPadTheme(darkTheme = isDark) {
         HideSystemBars()
 
@@ -212,6 +217,7 @@ fun WifiPadApp() {
                             onDarkChange = { isDark = it },
                             motionEnabled = motionEnabled,
                             onMotionChange = { motionEnabled = it },
+                            motionSupported = motion.available,
                             onRecenter = { motion.recenter() },
                             switchMode = switchMode,
                             onSwitchModeChange = { switchMode = it },
@@ -283,6 +289,7 @@ private fun SettingsDrawer(
     onDarkChange: (Boolean) -> Unit,
     motionEnabled: Boolean,
     onMotionChange: (Boolean) -> Unit,
+    motionSupported: Boolean,
     onRecenter: () -> Unit,
     switchMode: Boolean,
     onSwitchModeChange: (Boolean) -> Unit,
@@ -368,17 +375,27 @@ private fun SettingsDrawer(
                 Column(Modifier.weight(1f)) {
                     Text("体感", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
                     Text(
-                        if (motionEnabled) "陀螺仪 + 加速度计 → DSU" else "已关闭（省电）",
+                        when {
+                            !motionSupported -> "当前设备不支持体感"
+                            motionEnabled -> "陀螺仪 + 加速度计 → DSU"
+                            else -> "已关闭（省电）"
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (!motionSupported) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(checked = motionEnabled, onCheckedChange = onMotionChange)
+                Switch(
+                    checked = motionEnabled && motionSupported,
+                    onCheckedChange = { if (motionSupported) onMotionChange(it) },
+                    enabled = motionSupported
+                )
             }
 
             Spacer(Modifier.height(6.dp))
             OutlinedButton(
                 onClick = onRecenter,
+                enabled = motionSupported,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("把当前姿态设为正面", style = MaterialTheme.typography.labelLarge)
