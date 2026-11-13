@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 触觉反馈：按键震动 -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 体感：SENSOR_DELAY_FASTEST 需要该权限（Android 12+），否则抛 SecurityException -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
     <application
         android:allowBackup="true"

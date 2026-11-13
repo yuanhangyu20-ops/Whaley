@@ -488,7 +488,9 @@ class DSUServer(threading.Thread):
     def _make_data_packet(self) -> bytes:
         s = self.state.snapshot()
         self._packet_no = (self._packet_no + 1) & 0xFFFFFFFF
-        ts_us = int(time.time() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
+        # 用单调时钟：Yuzu 以 timestamp 差值积分角速度，系统时钟跳变会让
+        # 体感突然停顿或抖动。monotonic 保证严格递增且不受时钟同步影响。
+        ts_us = int(time.monotonic() * 1_000_000) & 0xFFFFFFFFFFFFFFFF
 
         # 单位换算：m/s² → g，rad/s → deg/s
         ax, ay, az = s["ax"] / GRAVITY, s["ay"] / GRAVITY, s["az"] / GRAVITY

@@ -161,12 +161,15 @@ fun WifiPadApp() {
                     // 体感只通过 gx/gy/gz + ax/ay/az 字段发送，由 PC 端走 DSU。
                     rx = state.netRStickX,
                     ry = state.netRStickY,
-                    gx = motion.gx,
-                    gy = motion.gy,
-                    gz = motion.gz,
-                    ax = motion.ax,
-                    ay = motion.ay,
-                    az = motion.az,
+                    // 体感：发送**原始**传感器值（rad/s 与 m/s²）。
+                    // 不在手机端做低通滤波 —— Yuzu 的 DSU 客户端自身有融合滤波，
+                    // 双重滤波会让倾斜幅度变浅、反应延迟、动一下就停。
+                    gx = motion.rawGx,
+                    gy = motion.rawGy,
+                    gz = motion.rawGz,
+                    ax = motion.rawAx,
+                    ay = motion.rawAy,
+                    az = motion.rawAz,
                     switchMode = switchMode,
                     motionEnabled = motionEnabled
                 )
