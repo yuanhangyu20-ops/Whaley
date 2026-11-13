@@ -32,8 +32,12 @@ import shutil
 import sys
 import time
 
-VIGEM_VENDOR = 0x045E    # Microsoft
-VIGEM_PRODUCT = 0x028E   # Xbox 360 Controller
+VIGEM_DEVICES = {
+    # (vendor, product): 说明
+    (0x045E, 0x028E): "Xbox 360 Controller",
+    (0x054C, 0x05C4): "DualShock 4 (ViGEm)",
+    (0x054C, 0x09CC): "DualShock 4 v2 (ViGEm)",
+}
 
 
 class SDL_GUID(ctypes.Structure):
@@ -76,8 +80,10 @@ def enumerate_gamepads(sdl) -> list[dict]:
     return result
 
 
-def is_vigem_pad(guid: str) -> bool:
+def vigem_kind(guid: str) -> str | None:
     """
+    判断这个 SDL GUID 是不是 ViGEm 虚拟设备，返回设备名或 None。
+
     SDL GUID 布局（16 字节）：
       0-1  bus        2-3  crc
       4-5  vendor     6-7  0
@@ -85,13 +91,13 @@ def is_vigem_pad(guid: str) -> bool:
       12-15 版本/其它
     """
     if len(guid) != 32:
-        return False
+        return None
     try:
         vendor = int.from_bytes(bytes.fromhex(guid[8:12]), "little") & 0xFFFF
         product = int.from_bytes(bytes.fromhex(guid[16:20]), "little") & 0xFFFF
     except ValueError:
-        return False
-    return vendor == VIGEM_VENDOR and product == VIGEM_PRODUCT
+        return None
+    return VIGEM_DEVICES.get((vendor, product))
 
 
 def find_config(yuzu_dir: str) -> str:
@@ -133,9 +139,10 @@ def main() -> int:
     target_guid = None
     for p in pads:
         mark = ""
-        if is_vigem_pad(p["guid"]):
+        kind = vigem_kind(p["guid"])
+        if kind:
             target_guid = p["guid"]
-            mark = "   ← ViGEm 虚拟 Xbox 手柄"
+            mark = f"   ← ViGEm 虚拟设备 ({kind})"
         print(f"      [{p['index']}] {p['name']}")
         print(f"           GUID = {p['guid']}{mark}")
 

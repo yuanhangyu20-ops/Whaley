@@ -5,7 +5,9 @@ Yuzu_Bridge.py — WifiPad 手机虚拟手柄 → Yuzu 模拟器 综合桥接
 
 功能
 ────
-1. 虚拟 Xbox 360 手柄（ViGEmBus + ctypes 直调 ViGEmClient.dll，无需 vgamepad）
+1. 虚拟 DualShock 4 手柄（ViGEmBus + ctypes 直调 ViGEmClient.dll）
+   · 必须用 DS4 而非 Xbox 360：ViGEm 的 X360 手柄只更新 XInput 接口，
+     SDL2（Yuzu 使用）通过 HID 读取会得到全零，表现为游戏里按什么都没反应
    · 按键反向映射：手机 Xbox A→虚拟 B，B→A，X→Y，Y→X（适配 Yuzu 的 Switch 布局）
    · LB/RB、LT/RT、十字键、L3/R3、双摇杆全部映射
 2. DSU / Cemuhook 服务端（UDP 26760）
@@ -83,24 +85,37 @@ BTN_NAMES = {
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  XInput / ViGEm 常量
+#  DS4 (DualShock 4) 常量 —— ViGEm DS4_REPORT 定义
 # ══════════════════════════════════════════════════════════════════
 
-XUSB_DPAD_UP = 0x0001
-XUSB_DPAD_DOWN = 0x0002
-XUSB_DPAD_LEFT = 0x0004
-XUSB_DPAD_RIGHT = 0x0008
-XUSB_START = 0x0010
-XUSB_BACK = 0x0020
-XUSB_LEFT_THUMB = 0x0040
-XUSB_RIGHT_THUMB = 0x0080
-XUSB_LEFT_SHOULDER = 0x0100
-XUSB_RIGHT_SHOULDER = 0x0200
-XUSB_GUIDE = 0x0400
-XUSB_A = 0x1000
-XUSB_B = 0x2000
-XUSB_X = 0x4000
-XUSB_Y = 0x8000
+# 面板按键位
+DS4_SQUARE = 1 << 4
+DS4_CROSS = 1 << 5
+DS4_CIRCLE = 1 << 6
+DS4_TRIANGLE = 1 << 7
+# 肩键 / 扳机键（数字位）
+DS4_L1 = 1 << 8
+DS4_R1 = 1 << 9
+DS4_L2 = 1 << 10
+DS4_R2 = 1 << 11
+# 功能键
+DS4_SHARE = 1 << 12
+DS4_OPTIONS = 1 << 13
+# 摇杆下压
+DS4_L3 = 1 << 14
+DS4_R3 = 1 << 15
+
+# D-Pad 是 wButtons 的低 4 位（HAT 编码）
+DS4_DPAD_N = 0
+DS4_DPAD_NE = 1
+DS4_DPAD_E = 2
+DS4_DPAD_SE = 3
+DS4_DPAD_S = 4
+DS4_DPAD_SW = 5
+DS4_DPAD_W = 6
+DS4_DPAD_NW = 7
+DS4_DPAD_NONE = 8
+DS4_DPAD_MASK = 0x0F
 
 VIGEM_ERROR_NONE = 0x20000000
 VIGEM_ERRORS = {
@@ -115,16 +130,27 @@ VIGEM_ERRORS = {
 }
 
 
-class XUSB_REPORT(ctypes.Structure):
-    """ViGEmBus 的 Xbox 360 输入报告"""
+class DS4_REPORT(ctypes.Structure):
+    """
+    ViGEmBus 的 DualShock 4 输入报告。
+
+    为什么用 DS4 而不是 Xbox 360？
+    ─────────────────────────────
+    ViGEm 的虚拟 Xbox 360 手柄只更新 XInput 接口，SDL2 通过 HID 读取时
+    永远得到全零 —— 实测 XInput 能读到 btn=0x1000，但 SDL 的
+    GameController 和 Joystick 两层都是 0。Yuzu 用 SDL，所以按什么都没反应。
+
+    ViGEm 的 DS4 手柄会生成完整的 HID 输入报告，SDL2 通过 HIDAPI 能正常读取。
+    """
     _fields_ = [
+        ("bThumbLX", ctypes.c_ubyte),   # 0..255, 中心 128
+        ("bThumbLY", ctypes.c_ubyte),
+        ("bThumbRX", ctypes.c_ubyte),
+        ("bThumbRY", ctypes.c_ubyte),
         ("wButtons", ctypes.c_ushort),
-        ("bLeftTrigger", ctypes.c_ubyte),
-        ("bRightTrigger", ctypes.c_ubyte),
-        ("sThumbLX", ctypes.c_short),
-        ("sThumbLY", ctypes.c_short),
-        ("sThumbRX", ctypes.c_short),
-        ("sThumbRY", ctypes.c_short),
+        ("bSpecial", ctypes.c_ubyte),
+        ("bTriggerL", ctypes.c_ubyte),  # 0..255
+        ("bTriggerR", ctypes.c_ubyte),
     ]
 
 
@@ -132,18 +158,15 @@ class XUSB_REPORT(ctypes.Structure):
 #  ViGEmClient 封装（ctypes）
 # ══════════════════════════════════════════════════════════════════
 
-class VirtualXbox360:
-    """通过 ViGEmClient.dll 创建并驱动一个虚拟 Xbox 360 手柄"""
+class VirtualDS4:
+    """通过 ViGEmClient.dll 创建并驱动一个虚拟 DualShock 4 手柄"""
 
     def __init__(self, dll_path: str | None = None):
         if dll_path is None:
             dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "ViGEmClient.dll")
         if not os.path.isfile(dll_path):
-            raise FileNotFoundError(
-                f"找不到 ViGEmClient.dll：{dll_path}\n"
-                f"请把它放在与本脚本相同的目录下。"
-            )
+            raise FileNotFoundError(f"找不到 ViGEmClient.dll：{dll_path}")
 
         self._dll = ctypes.CDLL(dll_path)
         self._bind()
@@ -157,14 +180,13 @@ class VirtualXbox360:
             self._dll.vigem_free(self._client)
             raise RuntimeError(
                 f"连接 ViGEmBus 失败：{self._err_text(err)}\n"
-                f"请确认已安装 ViGEmBus 驱动且服务正在运行。"
-            )
+                f"请确认已安装 ViGEmBus 驱动且服务正在运行。")
 
-        self._target = self._dll.vigem_target_x360_alloc()
+        self._target = self._dll.vigem_target_ds4_alloc()
         if not self._target:
             self._dll.vigem_disconnect(self._client)
             self._dll.vigem_free(self._client)
-            raise RuntimeError("vigem_target_x360_alloc 失败")
+            raise RuntimeError("vigem_target_ds4_alloc 失败")
 
         err = self._dll.vigem_target_add(self._client, self._target)
         if err != VIGEM_ERROR_NONE:
@@ -175,41 +197,30 @@ class VirtualXbox360:
 
         self._connected = True
 
-        # ── 关键：等待系统枚举完设备 ──
-        # 驱动添加目标后，XInput 需要 1~3 秒才能枚举到该设备。
-        # 若在此期间调用 update，报告会被直接丢弃（表现为手柄存在但数值永不更新）。
+        # 等待系统枚举完设备，否则最初的报告会被丢弃
         time.sleep(2.5)
 
     def _bind(self):
         d = self._dll
         d.vigem_alloc.argtypes = ()
         d.vigem_alloc.restype = ctypes.c_void_p
-
         d.vigem_free.argtypes = (ctypes.c_void_p,)
         d.vigem_free.restype = None
-
         d.vigem_connect.argtypes = (ctypes.c_void_p,)
         d.vigem_connect.restype = ctypes.c_uint
-
         d.vigem_disconnect.argtypes = (ctypes.c_void_p,)
         d.vigem_disconnect.restype = None
-
-        d.vigem_target_x360_alloc.argtypes = ()
-        d.vigem_target_x360_alloc.restype = ctypes.c_void_p
-
+        d.vigem_target_ds4_alloc.argtypes = ()
+        d.vigem_target_ds4_alloc.restype = ctypes.c_void_p
         d.vigem_target_free.argtypes = (ctypes.c_void_p,)
         d.vigem_target_free.restype = None
-
         d.vigem_target_add.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
         d.vigem_target_add.restype = ctypes.c_uint
-
         d.vigem_target_remove.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
         d.vigem_target_remove.restype = ctypes.c_uint
-
-        d.vigem_target_x360_update.argtypes = (
-            ctypes.c_void_p, ctypes.c_void_p, XUSB_REPORT
-        )
-        d.vigem_target_x360_update.restype = ctypes.c_uint
+        d.vigem_target_ds4_update.argtypes = (
+            ctypes.c_void_p, ctypes.c_void_p, DS4_REPORT)
+        d.vigem_target_ds4_update.restype = ctypes.c_uint
 
     @staticmethod
     def _err_text(code: int) -> str:
@@ -217,8 +228,8 @@ class VirtualXbox360:
             return "成功"
         return VIGEM_ERRORS.get(code, f"未知错误 0x{code:08X}")
 
-    def update(self, report: XUSB_REPORT) -> int:
-        return self._dll.vigem_target_x360_update(self._client, self._target, report)
+    def update(self, report) -> int:
+        return self._dll.vigem_target_ds4_update(self._client, self._target, report)
 
     def close(self):
         if not self._connected:
@@ -612,81 +623,107 @@ class PhoneReceiver(threading.Thread):
 #  虚拟手柄推送
 # ══════════════════════════════════════════════════════════════════
 
-def axis_to_xinput(v: float) -> int:
-    """[-1,1] → [-32768, 32767]"""
+def axis_to_ds4(v: float) -> int:
+    """[-1,1] → [0,255]，中心 128"""
     v = max(-1.0, min(1.0, v))
-    return int(v * 32767) if v >= 0 else int(v * 32768)
+    return int(round((v + 1.0) * 127.5))
 
 
-def build_report(s: dict, swap_abxy: bool = True) -> XUSB_REPORT:
+def build_report(s: dict, swap_abxy: bool = True) -> DS4_REPORT:
     """
-    手机按键 → XInput 报告
+    手机按键 → DS4 报告
 
-    Args:
-        s: 共享状态快照
-        swap_abxy: True 时做 A/B、X/Y 交叉映射（适配跳过关的 Switch 布局直觉）
-                   False 时一一对应
+    与 Yuzu 的映射关系（Pro Controller 布局）：
+      Switch A(右) = DS4 Circle，Switch B(下) = DS4 Cross
+      Switch X(上) = DS4 Triangle，Switch Y(左) = DS4 Square
+
+    swap_abxy=True 时做交叉，让"手机 A"落在 Switch 的 A 上。
     """
     b = s["buttons"]
     wb = 0
 
     # ── ABXY 映射 ──
     if swap_abxy:
-        # 交叉：手机 A → 虚拟 B，B → A，X → Y，Y → X
+        # 手机 A → Circle(右)，B → Cross(下)，X → Triangle(上)，Y → Square(左)
         if b & B_A:
-            wb |= XUSB_B
+            wb |= DS4_CIRCLE
         if b & B_B:
-            wb |= XUSB_A
+            wb |= DS4_CROSS
         if b & B_X:
-            wb |= XUSB_Y
+            wb |= DS4_TRIANGLE
         if b & B_Y:
-            wb |= XUSB_X
+            wb |= DS4_SQUARE
     else:
         if b & B_A:
-            wb |= XUSB_A
+            wb |= DS4_CROSS
         if b & B_B:
-            wb |= XUSB_B
+            wb |= DS4_CIRCLE
         if b & B_X:
-            wb |= XUSB_X
+            wb |= DS4_SQUARE
         if b & B_Y:
-            wb |= XUSB_Y
+            wb |= DS4_TRIANGLE
 
-    # ── 其余按键正常映射 ──
-    if b & B_UP:
-        wb |= XUSB_DPAD_UP
-    if b & B_DOWN:
-        wb |= XUSB_DPAD_DOWN
-    if b & B_LEFT:
-        wb |= XUSB_DPAD_LEFT
-    if b & B_RIGHT:
-        wb |= XUSB_DPAD_RIGHT
+    # ── 肩键 / 扳机数字位 ──
     if b & B_LB:
-        wb |= XUSB_LEFT_SHOULDER
+        wb |= DS4_L1
     if b & B_RB:
-        wb |= XUSB_RIGHT_SHOULDER
-    if b & B_L3:
-        wb |= XUSB_LEFT_THUMB
-    if b & B_R3:
-        wb |= XUSB_RIGHT_THUMB
-    # VIEW → BACK（Switch 的 Minus 键）, MENU → START（Switch 的 Plus 键）
-    if b & B_VIEW:
-        wb |= XUSB_BACK
-    if b & B_MENU:
-        wb |= XUSB_START
+        wb |= DS4_R1
+    if b & B_LT:
+        wb |= DS4_L2
+    if b & B_RT:
+        wb |= DS4_R2
 
-    rep = XUSB_REPORT()
+    # ── 摇杆下压 ──
+    if b & B_L3:
+        wb |= DS4_L3
+    if b & B_R3:
+        wb |= DS4_R3
+
+    # ── VIEW → SHARE（Switch Minus），MENU → OPTIONS（Switch Plus）──
+    if b & B_VIEW:
+        wb |= DS4_SHARE
+    if b & B_MENU:
+        wb |= DS4_OPTIONS
+
+    # ── D-Pad：低 4 位 HAT 编码 ──
+    up = bool(b & B_UP)
+    down = bool(b & B_DOWN)
+    left = bool(b & B_LEFT)
+    right = bool(b & B_RIGHT)
+    if up and right:
+        hat = DS4_DPAD_NE
+    elif down and right:
+        hat = DS4_DPAD_SE
+    elif down and left:
+        hat = DS4_DPAD_SW
+    elif up and left:
+        hat = DS4_DPAD_NW
+    elif up:
+        hat = DS4_DPAD_N
+    elif down:
+        hat = DS4_DPAD_S
+    elif left:
+        hat = DS4_DPAD_W
+    elif right:
+        hat = DS4_DPAD_E
+    else:
+        hat = DS4_DPAD_NONE
+    wb = (wb & ~DS4_DPAD_MASK) | (hat & DS4_DPAD_MASK)
+
+    rep = DS4_REPORT()
     rep.wButtons = wb
-    # 扳机是模拟量 0~255，不是布尔键。手机端传 0.0~1.0 的浮点。
-    rep.bLeftTrigger = int(max(0.0, min(1.0, s["lt"])) * 255)
-    rep.bRightTrigger = int(max(0.0, min(1.0, s["rt"])) * 255)
-    rep.sThumbLX = axis_to_xinput(s["lx"])
-    rep.sThumbLY = axis_to_xinput(s["ly"])
-    rep.sThumbRX = axis_to_xinput(s["rx"])
-    rep.sThumbRY = axis_to_xinput(s["ry"])
+    rep.bSpecial = 0
+    # 扳机是模拟量 0..255
+    rep.bTriggerL = int(max(0.0, min(1.0, s["lt"])) * 255)
+    rep.bTriggerR = int(max(0.0, min(1.0, s["rt"])) * 255)
+    rep.bThumbLX = axis_to_ds4(s["lx"])
+    rep.bThumbLY = axis_to_ds4(-s["ly"])   # DS4 的 Y 轴向下为正
+    rep.bThumbRX = axis_to_ds4(s["rx"])
+    rep.bThumbRY = axis_to_ds4(-s["ry"])
     return rep
 
 
-def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event,
+def pad_loop(gamepad: VirtualDS4, state: SharedState, stop: threading.Event,
              swap_abxy: bool = True):
     """60Hz 推送虚拟手柄状态"""
     frame = 1.0 / 60.0
@@ -695,24 +732,25 @@ def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event,
     frames = 0
     try:
         # ── 启动抖动 ──
-        # XInput 对新建的 ViGEm 虚拟手柄存在缓存问题：若首帧就是全零报告，
-        # XInputGetState 可能长期返回初始的陈旧值（pack 不递增）。
-        # 先发送几次明显不同的报告，强制 XInput 刷新内部状态。
+        # 先发几帧明显不同的报告，让 SDL/系统立刻感知到设备活动
         for jiggle in (
-            (0x1000, 32767, -32768, 32767, -32768),   # A键 + 摇杆打角
-            (0x0000, -32768, 32767, -32768, 32767),   # 反向打角
-            (0x0000, 0, 0, 0, 0),                     # 回中
+            (DS4_CROSS, 255, 255, 0, 0),      # A + 摇杆打到一边
+            (0, 0, 0, 255, 255),              # 反向
+            (0, 128, 128, 128, 128),          # 回中
         ):
-            r = XUSB_REPORT()
+            r = DS4_REPORT()
             r.wButtons = jiggle[0]
-            r.sThumbLX = jiggle[1]
-            r.sThumbLY = jiggle[2]
-            r.sThumbRX = jiggle[3]
-            r.sThumbRY = jiggle[4]
+            r.bSpecial = 0
+            r.bTriggerL = 0
+            r.bTriggerR = 0
+            r.bThumbLX = jiggle[1]
+            r.bThumbLY = jiggle[2]
+            r.bThumbRX = jiggle[3]
+            r.bThumbRY = jiggle[4]
             for _ in range(5):
                 gamepad.update(r)
                 time.sleep(0.02)
-        print("[PAD] 已发送启动抖动，XInput 状态已刷新", flush=True)
+        print("[PAD] 已发送启动抖动", flush=True)
 
         while not stop.is_set():
             s = state.snapshot()
@@ -724,14 +762,14 @@ def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event,
             if frames % 300 == 0:
                 print(
                     f"[PAD] 已推送 {frames} 帧  "
-                    f"btn=0x{rep.wButtons:04X} LT={rep.bLeftTrigger} RT={rep.bRightTrigger} "
-                    f"L=({rep.sThumbLX},{rep.sThumbLY}) R=({rep.sThumbRX},{rep.sThumbRY}) ret=0x{err:08X}",
+                    f"btn=0x{rep.wButtons:04X} LT={rep.bTriggerL} RT={rep.bTriggerR} "
+                    f"L=({rep.bThumbLX},{rep.bThumbLY}) R=({rep.bThumbRX},{rep.bThumbRY}) ret=0x{err:08X}",
                     flush=True,
                 )
             if err != VIGEM_ERROR_NONE:
                 errors += 1
                 if errors == 1:
-                    print(f"[PAD] 更新失败: {VirtualXbox360._err_text(err)}", flush=True)
+                    print(f"[PAD] 更新失败: {VirtualDS4._err_text(err)}", flush=True)
             next_t += frame
             wait = next_t - time.monotonic()
             if wait > 0:
@@ -786,7 +824,7 @@ def main() -> int:
 
     print("=" * 62)
     print("  WifiPad → Yuzu 桥接")
-    print("  · 虚拟 Xbox 360 手柄（按键/摇杆）")
+    print("  · 虚拟 DualShock 4 手柄（按键/摇杆）")
     print("  · DSU 体感（陀螺仪/加速度计）")
     print("=" * 62)
 
@@ -797,8 +835,8 @@ def main() -> int:
         print("       → 请先安装 ViGEmBus 驱动（安装包随 vgamepad 提供）")
 
     try:
-        gamepad = VirtualXbox360()
-        print("[检查] 虚拟 Xbox 360 手柄: 创建成功 ✓")
+        gamepad = VirtualDS4()
+        print("[检查] 虚拟 DualShock 4 手柄: 创建成功 ✓")
     except Exception as e:
         print(f"[检查] 虚拟手柄创建失败: {e}")
         if args.check:
