@@ -354,3 +354,81 @@ PhoneGyro 的**姿态锚定**（`motion/attitudeanchor.go`）能压制 DSU 客�
 （60 秒快速运动：无修正漂移 34.5°，有修正 0.1°）。它需要手机提供四元数
 （`deviceorientation`）并在服务器维护一个"客户端将达到的姿态"模型，工程量较大，
 暂未实现。若后续发现长时间玩有累积偏移，再移植。
+
+---
+
+## 十、【最关键】Yuzu 的体感输入源必须选 muhooku，不能是 sdl
+
+这是排查过程中绕了最久的坑，由用户自己发现。
+
+### Yuzu「控制 → 体感」下拉框有两个选项
+
+| 选项 | 数据来源 | 是否可用 |
+|---|---|---|
+| **sdl** | 从 SDL 手柄读陀螺仪 | ✗ **不可用** |
+| **muhooku** | 从 Cemuhook / DSU 服务器读 | ✓ **正确** |
+
+### 为什么 sdl 不行
+
+ViGEm 的虚拟 DS4 手柄，其 `DS4_REPORT` 结构里**根本没有陀螺仪字段**：
+
+```c
+typedef struct {
+    BYTE bThumbLX, bThumbLY, bThumbRX, bThumbRY;
+    USHORT wButtons;
+    BYTE bSpecial;
+    BYTE bTriggerL, bTriggerR;
+} DS4_REPORT;      // 10 字节，没有 gyro/accel
+```
+
+所以选 sdl 时，Yuzu 从虚拟手柄永远读到"静止"，界面上的体感指示器纹丝不动。
+按键、摇杆完全正常（那是 HID 报告里的），只有体感是空的。
+
+**这就是"手柄一切正常但体感死活不动"的真正原因**——不是 DSU 没连上，
+而是 Yuzu 压根没在看 DSU。
+
+### 判据
+
+桥接窗口同时出现下面两行才算真通：
+
+```
+[DSU] Yuzu 已订阅 ← 127.0.0.1:xxxxx
+[状态] 手机在线 120pps  DSU客户端=1 推送=xxxxx（持续增长）
+```
+
+**但如果 Yuzu 的体感源是 sdl，即使这两行也在，界面依然不动。**
+
+### 持久化
+
+Yuzu 界面里改的只是内存状态，配置文件的写法是：
+
+```
+player_0_motionleft="engine:sdl,motion:0,port:0,guid:030000004c05..."      ← 重启就退回
+player_0_motionright="engine:sdl,motion:0,port:0,guid:030000004c05..."
+```
+
+必须写成 cemuhookudp 才持久（`guid` 是 127.0.0.1 的十六进制，不是设备 GUID）：
+
+```
+player_0_motionleft="engine:cemuhookudp,guid:0000000000000000000000007f000001,port:26760,pad:0,motion:0"
+player_0_motionright="engine:cemuhookudp,guid:0000000000000000000000007f000001,port:26760,pad:0,motion:0"
+```
+
+一键修复（**Yuzu 必须先关闭**，否则退出时会覆盖）：
+
+```powershell
+cd D:\devkit\wifipad\pc
+python fix_yuzu_motion.py --check     # 先看状态
+python fix_yuzu_motion.py             # 修复
+```
+
+### 排查流程图
+
+```
+体感不动
+  ├─ 桥接显示 DSU客户端=0 ?
+  │    ├─ Yuzu 没开游戏/设置界面 → 正常，先打开
+  │    └─ 开了还是没有 → 检查 player_0_motionleft 是否 cemuhookudp
+  └─ 桥接显示 DSU客户端=1 且推送在涨 ?
+       └─ 但界面还是不动 → Yuzu 的体感源是 sdl！改成 muhooku
+```
