@@ -4,6 +4,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.setValue
+import com.example.wifipad.net.Protocol
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 按键 ID 常量。
@@ -27,40 +29,87 @@ object Btn {
         DPAD_LEFT to "LEFT", DPAD_RIGHT to "RIGHT",
         LT to "LT", RT to "RT"
     )
+
+    fun protocolBit(id: Int): Int = when (id) {
+        A -> Protocol.B_A
+        B -> Protocol.B_B
+        X -> Protocol.B_X
+        Y -> Protocol.B_Y
+        DPAD_UP -> Protocol.B_UP
+        DPAD_DOWN -> Protocol.B_DOWN
+        DPAD_LEFT -> Protocol.B_LEFT
+        DPAD_RIGHT -> Protocol.B_RIGHT
+        LT -> Protocol.B_LT
+        RT -> Protocol.B_RT
+        else -> 0
+    }
 }
 
 /**
  * 虚拟手柄运行时状态。
- * 全部字段都是 Compose Snapshot 状态，读写会自动触发重组。
+ *
+ * Compose 状态用于 UI 渲染；
+ * 另外维护一份线程安全的快照（AtomicInteger 位掩码 + @Volatile 数值），
+ * 供 60Hz UDP 发送线程读取，避免跨线程访问 Compose 集合。
  */
 class GamepadState {
-    /** 左摇杆 X 轴，范围 [-1, 1]（右为正） */
     var stickX by mutableFloatStateOf(0f)
         private set
-
-    /** 左摇杆 Y 轴，范围 [-1, 1]（上为正） */
     var stickY by mutableFloatStateOf(0f)
         private set
-
-    /** 左扳机，范围 [0, 1] */
     var lTrigger by mutableFloatStateOf(0f)
-
-    /** 右扳机，范围 [0, 1] */
+        private set
     var rTrigger by mutableFloatStateOf(0f)
+        private set
 
     private val pressed = mutableStateListOf<Int>()
+
+    // ── 网络线程安全快照 ──
+    private val buttonMask = AtomicInteger(0)
+
+    @Volatile
+    var netStickX = 0f
+        private set
+
+    @Volatile
+    var netStickY = 0f
+        private set
+
+    @Volatile
+    var netLTrigger = 0f
+        private set
+
+    @Volatile
+    var netRTrigger = 0f
+        private set
 
     fun setStick(x: Float, y: Float) {
         stickX = x
         stickY = y
+        netStickX = x
+        netStickY = y
+    }
+
+    fun updateLTrigger(value: Float) {
+        lTrigger = value
+        netLTrigger = value
+    }
+
+    fun updateRTrigger(value: Float) {
+        rTrigger = value
+        netRTrigger = value
     }
 
     fun press(id: Int) {
         if (!pressed.contains(id)) pressed.add(id)
+        val bit = Btn.protocolBit(id)
+        buttonMask.updateAndGet { current -> current or bit }
     }
 
     fun release(id: Int) {
         pressed.remove(id)
+        val bit = Btn.protocolBit(id)
+        buttonMask.updateAndGet { current -> current and bit.inv() }
     }
 
     fun isDown(id: Int): Boolean = pressed.contains(id)
@@ -69,4 +118,7 @@ class GamepadState {
 
     fun pressedLabels(): String =
         pressed.map { Btn.names[it] ?: it.toString() }.joinToString(",")
+
+    /** 当前按键位掩码（供网络层读取） */
+    fun currentButtonMask(): Int = buttonMask.get()
 }

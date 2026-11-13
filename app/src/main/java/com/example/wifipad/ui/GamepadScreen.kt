@@ -1,6 +1,7 @@
 package com.example.wifipad.ui
 
 import android.app.Activity
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,49 +11,142 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.example.wifipad.net.GamepadPacket
+import com.example.wifipad.net.Protocol
+import com.example.wifipad.net.UdpSender
+import com.example.wifipad.sensor.MotionController
+import kotlinx.coroutines.awaitCancellation
+import java.util.concurrent.atomic.AtomicInteger
 
-/** 半透明控件常用色 */
 private val GlassFill = Color.White.copy(alpha = 0.12f)
 private val GlassFillActive = Color.White.copy(alpha = 0.42f)
 private val GlassBorder = Color.White.copy(alpha = 0.38f)
 private val GlassBorderActive = Color.White.copy(alpha = 0.92f)
 private val DebugGreen = Color(0xFF00E676)
 private val DebugText = Color(0xFFB2FF59)
+private val Mono = FontFamily.Monospace
 
 @Composable
 fun GamepadScreen() {
     val state = remember { GamepadState() }
+    val context = LocalContext.current
+    val motion = remember { MotionController(context) }
+    val sender = remember { UdpSender() }
+    val sentCounter = remember { AtomicInteger(0) }
+
     HideSystemBars()
+
+    // 传感器生命周期跟随界面
+    DisposableEffect(Unit) {
+        motion.start()
+        onDispose { motion.stop() }
+    }
+
+    var ipText by rememberSaveable { mutableStateOf("192.168.1.100") }
+    var portText by rememberSaveable { mutableStateOf(Protocol.DEFAULT_PORT.toString()) }
+    var sending by remember { mutableStateOf(false) }
+    var statusText by remember { mutableStateOf("待连接") }
+    var pps by remember { mutableIntStateOf(0) }
+    // seq 用 AtomicInteger：在 IO 线程递增，不触发 Compose 重组
+    val seqCounter = remember { AtomicInteger(0) }
+
+    // 60Hz UDP 发送（IP / 端口 / 开关变化时重启）
+    LaunchedEffect(sending, ipText, portText) {
+        if (!sending) return@LaunchedEffect
+        val host = ipText.trim()
+        val port = portText.trim().toIntOrNull() ?: Protocol.DEFAULT_PORT
+        statusText = "发送中 60Hz → $host:$port"
+
+        sender.onError = { msg ->
+            statusText = "错误: $msg"
+            sending = false
+        }
+        sender.onSent = { sentCounter.incrementAndGet() }
+
+        sender.start(
+            scope = this,
+            host = host,
+            port = port
+        ) {
+            GamepadPacket(
+                seq = seqCounter.getAndIncrement(),
+                timestampMs = SystemClock.uptimeMillis(),
+                buttons = state.currentButtonMask(),
+                lTrigger = state.netLTrigger,
+                rTrigger = state.netRTrigger,
+                lx = state.netStickX,
+                ly = state.netStickY,
+                rx = motion.rStickX,
+                ry = motion.rStickY,
+                gx = motion.gx,
+                gy = motion.gy,
+                gz = motion.gz,
+                ax = motion.ax,
+                ay = motion.ay,
+                az = motion.az
+            )
+        }
+
+        try {
+            awaitCancellation()
+        } finally {
+            sender.stop()
+        }
+    }
+
+    // 每秒统计发送频率
+    LaunchedEffect(sending) {
+        if (!sending) {
+            pps = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val before = sentCounter.get()
+            kotlinx.coroutines.delay(1000)
+            pps = sentCounter.get() - before
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -67,10 +161,10 @@ fun GamepadScreen() {
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             TriggerKey(label = "LT", active = state.lTrigger > 0.5f) { down ->
-                state.lTrigger = if (down) 1f else 0f
+                state.updateLTrigger(if (down) 1f else 0f)
             }
             TriggerKey(label = "RT", active = state.rTrigger > 0.5f) { down ->
-                state.rTrigger = if (down) 1f else 0f
+                state.updateRTrigger(if (down) 1f else 0f)
             }
         }
 
@@ -78,16 +172,16 @@ fun GamepadScreen() {
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 34.dp, bottom = 18.dp)
+                .padding(start = 34.dp, bottom = 16.dp)
         ) {
-            Joystick(state = state, diameter = 150.dp)
+            Joystick(state = state, diameter = 146.dp)
         }
 
         // ── 左上偏中：十字键 ──
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 96.dp, top = 74.dp)
+                .padding(start = 92.dp, top = 76.dp)
         ) {
             DPad(state = state)
         }
@@ -96,23 +190,33 @@ fun GamepadScreen() {
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
-                .padding(end = 44.dp, top = 18.dp)
+                .padding(end = 40.dp, top = 16.dp)
         ) {
             ActionKeys(state = state)
         }
 
-        // ── 顶部中央：调试面板 ──
-        Box(
+        // ── 顶部中央：调试面板 + 网络面板 ──
+        Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 6.dp)
+                .padding(top = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            DebugPanel(state = state)
+            DebugPanel(state = state, motion = motion, pps = pps)
+            Box(Modifier.height(4.dp))
+            NetPanel(
+                ip = ipText,
+                onIpChange = { ipText = it },
+                port = portText,
+                onPortChange = { portText = it },
+                sending = sending,
+                status = statusText,
+                onToggle = { sending = !sending }
+            )
         }
     }
 }
 
-/** 隐藏系统状态栏/导航栏，进入沉浸全屏 */
 @Composable
 private fun HideSystemBars() {
     val view = LocalView.current
@@ -169,7 +273,6 @@ private fun TriggerKey(label: String, active: Boolean, onDown: (Boolean) -> Unit
     }
 }
 
-/** 圆形按键（ABXY 与方向键共用） */
 @Composable
 private fun RoundKey(
     label: String,
@@ -190,7 +293,6 @@ private fun RoundKey(
     }
 }
 
-/** ABXY 菱形布局 */
 @Composable
 private fun ActionKeys(state: GamepadState) {
     val key = 54.dp
@@ -210,10 +312,9 @@ private fun ActionKeys(state: GamepadState) {
     }
 }
 
-/** 十字键 */
 @Composable
 private fun DPad(state: GamepadState) {
-    val key = 46.dp
+    val key = 44.dp
     Box(modifier = Modifier.size(key * 2 + 18.dp)) {
         Box(Modifier.align(Alignment.TopCenter)) {
             RoundKey("↑", state.isDown(Btn.DPAD_UP), { d -> toggle(state, Btn.DPAD_UP, d) }, key)
@@ -234,11 +335,6 @@ private fun toggle(state: GamepadState, id: Int, down: Boolean) {
     if (down) state.press(id) else state.release(id)
 }
 
-/**
- * 模拟摇杆。
- * 指针事件在 Canvas 上手动处理：只锁定第一根落在底座范围内的手指，
- * 其余手指事件完全不受影响 → 左手摇杆与右手按键可同时工作。
- */
 @Composable
 private fun Joystick(state: GamepadState, diameter: Dp) {
     val density = LocalDensity.current
@@ -286,10 +382,8 @@ private fun Joystick(state: GamepadState, diameter: Dp) {
             }
     ) {
         val c = Offset(size.width / 2f, size.height / 2f)
-        // 底座
         drawCircle(Color.White.copy(alpha = 0.07f), radius = baseR, center = c)
         drawCircle(Color.White.copy(alpha = 0.30f), radius = baseR, center = c, style = Stroke(2.dp.toPx()))
-        // 十字参考线
         drawLine(
             Color.White.copy(alpha = 0.12f),
             Offset(c.x - baseR * 0.72f, c.y),
@@ -302,7 +396,6 @@ private fun Joystick(state: GamepadState, diameter: Dp) {
             Offset(c.x, c.y + baseR * 0.72f),
             strokeWidth = 1.dp.toPx()
         )
-        // 摇杆头
         val head = Offset(
             c.x + state.stickX * maxR,
             c.y - state.stickY * maxR
@@ -319,41 +412,110 @@ private fun updateStick(state: GamepadState, position: Offset, center: Offset, m
     state.setStick(clamped.x / maxR, -(clamped.y / maxR))
 }
 
-/** 调试面板：实时显示按键 ID 与摇杆坐标 */
 @Composable
-private fun DebugPanel(state: GamepadState) {
-    val mono = FontFamily.Monospace
-    val ids = state.pressedIds()
+private fun DebugPanel(state: GamepadState, motion: MotionController, pps: Int) {
     Column(
         modifier = Modifier
             .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
             .border(1.dp, DebugGreen.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Text(
-            "DEBUG  ·  MULTI-TOUCH",
+            "DEBUG · MULTI-TOUCH · TX ${pps}Hz",
             color = DebugGreen,
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = mono
+            fontFamily = Mono
         )
         Text(
-            "KEYS[${ids.joinToString(",")}] ${state.pressedLabels()}",
-            color = DebugText,
-            fontSize = 10.sp,
-            fontFamily = mono
+            "KEYS[${state.pressedIds().joinToString(",")}] ${state.pressedLabels()}",
+            color = DebugText, fontSize = 10.sp, fontFamily = Mono
         )
         Text(
-            "STICK x=${"%+.2f".format(state.stickX)} y=${"%+.2f".format(state.stickY)}",
-            color = DebugText,
-            fontSize = 10.sp,
-            fontFamily = mono
+            "L-STICK x=${"%+.2f".format(state.stickX)} y=${"%+.2f".format(state.stickY)}",
+            color = DebugText, fontSize = 10.sp, fontFamily = Mono
         )
         Text(
-            "TRIG L=${"%.2f".format(state.lTrigger)} R=${"%.2f".format(state.rTrigger)}",
-            color = DebugText,
-            fontSize = 10.sp,
-            fontFamily = mono
+            "R-STICK x=${"%+.2f".format(motion.rStickX)} y=${"%+.2f".format(motion.rStickY)}",
+            color = DebugText, fontSize = 10.sp, fontFamily = Mono
+        )
+        Text(
+            "GYRO x=${"%+.2f".format(motion.gx)} y=${"%+.2f".format(motion.gy)} z=${"%+.2f".format(motion.gz)}",
+            color = DebugText, fontSize = 10.sp, fontFamily = Mono
+        )
+    }
+}
+
+@Composable
+private fun NetPanel(
+    ip: String,
+    onIpChange: (String) -> Unit,
+    port: String,
+    onPortChange: (String) -> Unit,
+    sending: Boolean,
+    status: String,
+    onToggle: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+            .border(1.dp, Color(0xFF40C4FF).copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SmallField(value = ip, onValueChange = onIpChange, width = 132.dp, keyboardType = KeyboardType.Uri)
+            Box(Modifier.width(4.dp))
+            SmallField(value = port, onValueChange = onPortChange, width = 62.dp, keyboardType = KeyboardType.Number)
+            Box(Modifier.width(6.dp))
+            Box(
+                modifier = Modifier
+                    .size(width = 62.dp, height = 26.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (sending) Color(0xFFFF5252).copy(alpha = 0.35f) else Color(0xFF40C4FF).copy(alpha = 0.28f))
+                    .border(1.dp, if (sending) Color(0xFFFF5252) else Color(0xFF40C4FF), RoundedCornerShape(6.dp))
+                    .pressGesture { down -> if (down) onToggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (sending) "停止" else "连接",
+                    color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Box(Modifier.height(2.dp))
+        Text(
+            "NET: $status",
+            color = Color(0xFF80D8FF), fontSize = 9.sp, fontFamily = Mono
+        )
+    }
+}
+
+@Composable
+private fun SmallField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    width: Dp,
+    keyboardType: KeyboardType
+) {
+    Box(
+        modifier = Modifier
+            .width(width)
+            .height(26.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(1.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 7.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = TextStyle(color = Color.White, fontSize = 11.sp, fontFamily = Mono),
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            cursorBrush = SolidColor(Color.White),
+            modifier = Modifier.fillMaxWidth()
         )
     }
 }
