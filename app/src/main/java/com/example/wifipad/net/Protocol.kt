@@ -11,7 +11,8 @@ import java.nio.ByteOrder
  * offset size field
  * 0      2    magic     "WP"
  * 2      1    version   2
- * 3      1    flags     保留
+ * 3      1    flags     bit0: 按键模式 (0=Xbox 直接映射, 1=Switch 交叉映射)
+ *                       bit1: 体感数据有效 (1=开, 0=关，此时 gx..az 恒为 0)
  * 4      4    seq       包序号（u32，自增）
  * 8      8    timestamp 手机 uptime（ms，u64）
  * 16     2    buttons   按键位掩码（u16）：
@@ -55,6 +56,12 @@ object Protocol {
     const val B_R3 = 1 shl 13
     const val B_VIEW = 1 shl 14
     const val B_MENU = 1 shl 15
+
+    // flags 位
+    /** 1 = Switch 模式（ABXY 交叉映射）；0 = Xbox 模式（一一对应） */
+    const val FLAG_MODE_SWITCH = 1 shl 0
+    /** 1 = 体感数据有效；0 = 体感关闭（传感器字段恒为 0） */
+    const val FLAG_MOTION = 1 shl 1
 }
 
 /** 一帧完整的输入状态 */
@@ -73,14 +80,21 @@ data class GamepadPacket(
     val gz: Float,
     val ax: Float,
     val ay: Float,
-    val az: Float
+    val az: Float,
+    /** true = Switch 模式（PC 端做 ABXY 交叉映射）*/
+    val switchMode: Boolean = false,
+    /** true = 本帧携带有效体感数据 */
+    val motionEnabled: Boolean = true
 ) {
     fun encode(): ByteArray {
         val buf = ByteBuffer.allocate(Protocol.PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
         buf.put('W'.code.toByte())
         buf.put('P'.code.toByte())
         buf.put(Protocol.VERSION.toByte())
-        buf.put(0)
+        var flags = 0
+        if (switchMode) flags = flags or Protocol.FLAG_MODE_SWITCH
+        if (motionEnabled) flags = flags or Protocol.FLAG_MOTION
+        buf.put(flags.toByte())
         buf.putInt(seq)
         buf.putLong(timestampMs)
         buf.putShort(buttons.toShort())
@@ -90,12 +104,14 @@ data class GamepadPacket(
         buf.put(qAxis(ly))
         buf.put(qAxis(rx))
         buf.put(qAxis(ry))
-        buf.putShort(qSensor(gx))
-        buf.putShort(qSensor(gy))
-        buf.putShort(qSensor(gz))
-        buf.putShort(qSensor(ax))
-        buf.putShort(qSensor(ay))
-        buf.putShort(qSensor(az))
+        // 体感关闭时发送 0，避免 PC 端误判
+        val motion = if (motionEnabled) 1f else 0f
+        buf.putShort(qSensor(gx * motion))
+        buf.putShort(qSensor(gy * motion))
+        buf.putShort(qSensor(gz * motion))
+        buf.putShort(qSensor(if (motionEnabled) ax else 0f))
+        buf.putShort(qSensor(if (motionEnabled) ay else 0f))
+        buf.putShort(qSensor(if (motionEnabled) az else 0f))
         return buf.array()
     }
 

@@ -71,6 +71,10 @@ B_R3 = 1 << 13
 B_VIEW = 1 << 14
 B_MENU = 1 << 15
 
+# flags 位（与手机端 Protocol.kt 一致）
+FLAG_MODE_SWITCH = 1 << 0   # 1 = Switch 交叉映射, 0 = Xbox 直接映射
+FLAG_MOTION = 1 << 1        # 1 = 本帧体感有效
+
 BTN_NAMES = {
     B_A: "A", B_B: "B", B_X: "X", B_Y: "Y",
     B_UP: "UP", B_DOWN: "DOWN", B_LEFT: "LEFT", B_RIGHT: "RIGHT",
@@ -254,6 +258,8 @@ class SharedState:
         self.seq = 0
         self.last_rx_time = 0.0
         self.packets = 0
+        self.switch_mode = True      # 由手机 flags 更新
+        self.motion_enabled = True   # 由手机 flags 更新
 
     def update_from_app(self, pkt: dict):
         with self._lock:
@@ -271,6 +277,8 @@ class SharedState:
             self.ay = pkt["ay"]
             self.az = pkt["az"]
             self.seq = pkt["seq"]
+            self.switch_mode = pkt.get("switch_mode", True)
+            self.motion_enabled = pkt.get("motion_enabled", True)
             self.last_rx_time = time.monotonic()
             self.packets += 1
 
@@ -286,6 +294,8 @@ class SharedState:
                 "seq": self.seq,
                 "last_rx_time": self.last_rx_time,
                 "packets": self.packets,
+                "switch_mode": self.switch_mode,
+                "motion_enabled": self.motion_enabled,
             }
 
 
@@ -391,7 +401,8 @@ class DSUServer(threading.Thread):
             with self._clients_lock:
                 if addr not in self._clients:
                     self._clients[addr] = self.SLOT_INDEX
-                    print(f"[DSU] Yuzu 已订阅 ← {addr[0]}:{addr[1]}")
+                    print(f"[DSU] Yuzu 已订阅 ← {addr[0]}:{addr[1]}  "
+                          f"(共 {len(self._clients)} 个客户端)", flush=True)
 
     # ── 推送线程 ──
     def _push_loop(self):
@@ -499,6 +510,18 @@ class PhoneReceiver(threading.Thread):
                 self._peer = addr
                 print(f"[RX] 手机已连接 ← {addr[0]}:{addr[1]}")
 
+            # 体感：手机已把关闭时的传感器字段清 0，这里再按 flags 防一手。
+            # 体感关闭时上报「设备水平静止」的标准姿态 (0,0,1g) + 零角速度，
+            # 而不是全 0 —— 全 0 会让 Yuzu 认为手柄翻转朝下。
+            motion_on = bool(flags & FLAG_MOTION)
+            if motion_on:
+                gxf, gyf, gzf = gx / 100.0, gy / 100.0, gz / 100.0
+                axf, ayf, azf = ax / 100.0, ay / 100.0, az / 100.0
+            else:
+                gxf = gyf = gzf = 0.0
+                axf = ayf = 0.0
+                azf = GRAVITY      # 1g
+
             self.state.update_from_app({
                 "seq": seq,
                 "buttons": buttons,
@@ -508,12 +531,14 @@ class PhoneReceiver(threading.Thread):
                 "ly": ly / 127.0,
                 "rx": rx / 127.0,
                 "ry": ry / 127.0,
-                "gx": gx / 100.0,
-                "gy": gy / 100.0,
-                "gz": gz / 100.0,
-                "ax": ax / 100.0,
-                "ay": ay / 100.0,
-                "az": az / 100.0,
+                "gx": gxf,
+                "gy": gyf,
+                "gz": gzf,
+                "ax": axf,
+                "ay": ayf,
+                "az": azf,
+                "switch_mode": bool(flags & FLAG_MODE_SWITCH),
+                "motion_enabled": motion_on,
             })
 
         sock.close()
@@ -630,7 +655,9 @@ def pad_loop(gamepad: VirtualXbox360, state: SharedState, stop: threading.Event,
 
         while not stop.is_set():
             s = state.snapshot()
-            rep = build_report(s, swap_abxy)
+            # 手机端的模式优先；命令行 --no-swap 只是默认值
+            use_swap = s.get("switch_mode", swap_abxy)
+            rep = build_report(s, use_swap)
             err = gamepad.update(rep)
             frames += 1
             if frames % 300 == 0:
@@ -763,13 +790,22 @@ def main() -> int:
                 keys = ",".join(
                     n for bit, n in BTN_NAMES.items() if s["buttons"] & bit
                 ) or "-"
+                mode = "Switch" if s.get("switch_mode", True) else "Xbox"
+                mot = "开" if s.get("motion_enabled", True) else "关"
                 print(
-                    f"[状态] 手机{online} {pps:2d}pps  "
-                    f"KEY={keys:<20} "
+                    f"[状态] 手机{online} {pps:2d}pps  模式={mode} 体感={mot}  "
+                    f"DSU客户端={dsu.client_count} 推送={dsu.sent}"
+                )
+                print(
+                    f"        KEY={keys:<18} "
                     f"L=({s['lx']:+.2f},{s['ly']:+.2f}) "
                     f"R=({s['rx']:+.2f},{s['ry']:+.2f}) "
-                    f"TRIG={s['lt']:.2f}/{s['rt']:.2f}  "
-                    f"DSU客户端={dsu.client_count} 推送={dsu.sent}"
+                    f"TRIG={s['lt']:.2f}/{s['rt']:.2f}"
+                )
+                print(
+                    f"        GYRO=({s['gx']:+.2f},{s['gy']:+.2f},{s['gz']:+.2f}) rad/s  "
+                    f"ACC=({s['ax']/9.80665:+.2f},{s['ay']/9.80665:+.2f},"
+                    f"{s['az']/9.80665:+.2f}) g"
                 )
     except KeyboardInterrupt:
         print("\n[退出] 正在关闭…")

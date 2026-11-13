@@ -103,6 +103,20 @@ fun WifiPadApp() {
     var statusText by remember { mutableStateOf("待连接") }
     var pps by remember { mutableIntStateOf(0) }
 
+    // ── 体感开关 / 按键模式（持久化）──
+    var motionEnabled by rememberSaveable {
+        mutableStateOf(prefs.getBoolean("motion", true))
+    }
+    var switchMode by rememberSaveable {
+        mutableStateOf(prefs.getBoolean("switchMode", true))
+    }
+    LaunchedEffect(motionEnabled, switchMode) {
+        prefs.edit()
+            .putBoolean("motion", motionEnabled)
+            .putBoolean("switchMode", switchMode)
+            .apply()
+    }
+
     WifiPadTheme(darkTheme = isDark) {
         HideSystemBars()
 
@@ -115,8 +129,8 @@ fun WifiPadApp() {
             }
         }
 
-        DisposableEffect(Unit) {
-            motion.start()
+        DisposableEffect(motionEnabled) {
+            if (motionEnabled) motion.start() else motion.stop()
             onDispose { motion.stop() }
         }
 
@@ -152,7 +166,9 @@ fun WifiPadApp() {
                     gz = motion.gz,
                     ax = motion.ax,
                     ay = motion.ay,
-                    az = motion.az
+                    az = motion.az,
+                    switchMode = switchMode,
+                    motionEnabled = motionEnabled
                 )
             }
             try {
@@ -185,6 +201,10 @@ fun WifiPadApp() {
                         SettingsDrawer(
                             isDark = isDark,
                             onDarkChange = { isDark = it },
+                            motionEnabled = motionEnabled,
+                            onMotionChange = { motionEnabled = it },
+                            switchMode = switchMode,
+                            onSwitchModeChange = { switchMode = it },
                             ip = ipText,
                             onIpChange = { ipText = it },
                             port = portText,
@@ -251,6 +271,10 @@ private fun HideSystemBars() {
 private fun SettingsDrawer(
     isDark: Boolean,
     onDarkChange: (Boolean) -> Unit,
+    motionEnabled: Boolean,
+    onMotionChange: (Boolean) -> Unit,
+    switchMode: Boolean,
+    onSwitchModeChange: (Boolean) -> Unit,
     ip: String,
     onIpChange: (String) -> Unit,
     port: String,
@@ -298,6 +322,47 @@ private fun SettingsDrawer(
                     )
                 }
                 Switch(checked = isDark, onCheckedChange = onDarkChange)
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            // ── 手柄模式：Xbox / Switch ──
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (switchMode) "Switch 模式" else "Xbox 模式",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        if (switchMode) "A→B  B→A  X→Y  Y→X（交叉）"
+                        else "A→A  B→B  X→X  Y→Y（直接）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = switchMode, onCheckedChange = onSwitchModeChange)
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            // ── 体感开关 ──
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("体感", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (motionEnabled) "陀螺仪 + 加速度计 → DSU" else "已关闭（省电）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = motionEnabled, onCheckedChange = onMotionChange)
             }
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
