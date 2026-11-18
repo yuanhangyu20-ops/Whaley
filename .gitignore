@@ -37,3 +37,11 @@ __pycache__/
 dist/
 *.spec
 pc/build/
+# ── 发布产物归档（APK/exe 通过 GitHub Releases 分发）──
+release/
+
+# ── 第三方参考项目（不属于本仓库）──
+docs/PhoneGyro-reference/
+
+# ── vgamepad 源码包（仅本地参考）──
+pc/vgp/
