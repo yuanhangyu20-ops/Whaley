@@ -1,4 +1,4 @@
-# 鲸小游 · WifiPad
+# 鲸小游 · Whaley
 
 > **把手机变成全能体感手柄** —— 安卓手机上的 Xbox / Switch 虚拟手柄 + Cemuhook 体感，
 > 经局域网直连 PC，驱动 Yuzu、Cemu、Ryujinx、Steam 等平台。
@@ -113,7 +113,7 @@ sc query ViGEmBus
 
 **方式 A：免安装 exe（推荐，不用装 Python）**
 
-从 [Releases](https://github.com/yuanhangyu20-ops/WifiPad-Android/releases)
+从 [Releases](https://github.com/yuanhangyu20-ops/Whaley/releases)
 下载 **`Whaley-Bridge.exe`**（即鲸小游桥接），**双击运行**。
 
 它带一个**图形控制面板**，不需要看命令行：
@@ -203,7 +203,7 @@ ipconfig | Select-String "IPv4"
 
 #### 1. 安装 APK
 
-从 [Releases](https://github.com/yuanhangyu20-ops/WifiPad-Android/releases) 下载最新的
+从 [Releases](https://github.com/yuanhangyu20-ops/Whaley/releases) 下载最新的
 `jingxiaoyou-v1.0.0.apk` 安装。
 
 #### 2. 连接（两种方式）
